@@ -1,0 +1,17 @@
+╔══════════════════════════════════════════════════════════════╗
+║  SCORM Builder · Bienvenido                                  ║
+╚══════════════════════════════════════════════════════════════╝
+
+Para usar esta aplicación:
+
+  1. Abre el archivo INSTALAR.md (con doble clic) y sigue
+     las instrucciones. Son 3 pasos.
+
+  2. La primera vez ejecutas el instalador (1 vez sola).
+
+  3. Después abres la app y subes tus Words desde el navegador.
+
+
+SI TIENES DUDAS:
+  Vuelve a la conversación con Claude y le preguntas.
+
