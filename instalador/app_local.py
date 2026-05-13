@@ -295,7 +295,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.1</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -1924,6 +1924,21 @@ def course_edit(token):
 
       html += '<button type="button" class="btn-struct btn-add-wide" data-action="topic-add">+ Añadir tema nuevo</button>';
 
+      // ============================================================
+      // BANNER: aplicar mejoras IA al curso en un solo clic (v0.5.1)
+      // ============================================================
+      html += '<div class="ed-enrich-banner">';
+      html += '<div class="ed-enrich-banner-text">';
+      html += '<strong>✨ ¿Primera vez en el editor?</strong> ';
+      html += 'Pulsa el botón para que la IA enriquezca tu curso automáticamente. ';
+      html += 'Generará <strong>etiquetas temáticas</strong>, convertirá los párrafos clave en ';
+      html += '<strong>callouts visuales</strong> ([CLAVE], [ALERTA], [CITA]...) y creará un ';
+      html += '<strong>quiz mixto</strong> (test + V/F + huecos) en los temas con pocas preguntas. ';
+      html += 'Luego puedes ver el resultado con <em>👁 Vista previa</em>.';
+      html += '</div>';
+      html += '<button type="button" class="btn-ai btn-enrich-all" id="ed-enrich-all">✨ Aplicar mejoras IA al curso completo</button>';
+      html += '</div>';
+
       html += '<div class="ed-actions">';
       html += '<button class="btn" id="ed-save">💾 Guardar y reempaquetar</button>';
       html += '<button type="button" class="btn secondary" onclick="restoreSnapshot()" title="Descartar cambios desde el último guardado">↺ Descartar cambios</button>';
@@ -2586,6 +2601,70 @@ def course_edit(token):
             window.location.href = '/curso/' + TOKEN + '/export/cmi5';
           }} finally {{
             cmi5Btn.disabled = false; cmi5Btn.textContent = orig;
+          }}
+        }};
+      }}
+
+      // ----- APLICAR MEJORAS IA AL CURSO COMPLETO (v0.5.1) -----
+      const enrichAllBtn = document.getElementById('ed-enrich-all');
+      if (enrichAllBtn) {{
+        enrichAllBtn.onclick = async () => {{
+          collectChanges();
+          if (dirty) {{
+            const r = await fetch(API_SAVE, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(course)
+            }});
+            if (!r.ok) {{ alert('Guarda los cambios manualmente primero.'); return; }}
+            dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
+          }}
+          if (!confirm('La IA va a procesar todos los temas para:\\n' +
+                       '  • Generar etiquetas (tags) en los temas que no tengan.\\n' +
+                       '  • Convertir párrafos clave en callouts ([CLAVE], [ALERTA]...).\\n' +
+                       '  • Crear un quiz mixto (test + V/F + huecos) en los temas con < 3 preguntas.\\n\\n' +
+                       'Se creará una snapshot previa por si quieres revertir.\\n' +
+                       'Esto puede tardar 30-90 segundos por tema.\\n\\n¿Continuar?')) return;
+
+          const orig = enrichAllBtn.textContent;
+          enrichAllBtn.disabled = true;
+          enrichAllBtn.textContent = '⏳ Procesando temas... (puede tardar 1-2 min)';
+          try {{
+            const r = await fetch('/api/curso/' + TOKEN + '/ai-enrich-all', {{method: 'POST'}});
+            const data = await r.json();
+            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
+            const s = data.summary || {{}};
+
+            // Recargar estructura
+            const r2 = await fetch(API_GET);
+            if (r2.ok) {{
+              course = await r2.json();
+              courseSnapshot = JSON.parse(JSON.stringify(course));
+              dirty = false;
+              render();
+            }}
+
+            let msg = '✓ Mejoras IA aplicadas:\\n\\n';
+            msg += '  • ' + (s.topics_processed || 0) + ' tema(s) procesados\\n';
+            msg += '  • ' + (s.tags_generated || 0) + ' etiquetas generadas\\n';
+            msg += '  • ' + (s.callouts_applied || 0) + ' callouts aplicados\\n';
+            msg += '  • ' + (s.quiz_final_generated || 0) + ' preguntas del bloque final generadas\\n';
+            msg += '  • ' + (s.quiz_inline_generated || 0) + ' preguntas de repaso intercaladas\\n';
+            if (s.errors && s.errors.length) {{
+              msg += '\\n⚠ ' + s.errors.length + ' error(es):\\n  - ' + s.errors.join('\\n  - ');
+            }}
+            msg += '\\n\\nSnapshot previa: ' + (data.snapshot_id || '—');
+            msg += '\\n\\n¿Abrir vista previa para ver el resultado?';
+            if (confirm(msg)) {{
+              showPreviewModal(0);
+            }} else {{
+              setStatus('✓ Mejoras aplicadas. Pulsa "👁 Vista previa" cuando quieras ver el resultado.');
+            }}
+          }} catch (e) {{
+            alert('Error: ' + e.message);
+          }} finally {{
+            enrichAllBtn.disabled = false;
+            enrichAllBtn.textContent = orig;
           }}
         }};
       }}
@@ -3441,6 +3520,51 @@ def course_edit(token):
     #ed-preview-snap {{
       max-width: 240px;
       font-size: 0.85rem;
+    }}
+
+    /* =========================================================
+       BANNER "Aplicar mejoras IA al curso completo" (v0.5.1)
+       ========================================================= */
+    .ed-enrich-banner {{
+      margin: 1.5rem 0;
+      padding: 1.2rem 1.4rem;
+      background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 50%, #c7d2fe 100%);
+      border: 2px solid #a78bfa;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.15);
+    }}
+    .ed-enrich-banner-text {{
+      flex: 1;
+      min-width: 280px;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: #4c1d95;
+    }}
+    .ed-enrich-banner-text strong {{ color: #312e81; }}
+    .btn-enrich-all {{
+      padding: 0.85rem 1.5rem !important;
+      font-size: 0.95rem !important;
+      font-weight: 700 !important;
+      background: linear-gradient(135deg, #8b5cf6, #6366f1) !important;
+      color: white !important;
+      border: none !important;
+      border-radius: 8px !important;
+      cursor: pointer !important;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35) !important;
+      transition: transform 0.12s, box-shadow 0.12s !important;
+      white-space: nowrap;
+    }}
+    .btn-enrich-all:hover:not(:disabled) {{
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(139, 92, 246, 0.45) !important;
+    }}
+    .btn-enrich-all:disabled {{
+      opacity: 0.7;
+      cursor: not-allowed;
     }}
     </style>
     """
@@ -4307,6 +4431,164 @@ def course_export_cmi5(token):
     out_zip = course_dir / "curso_cmi5.zip"
     export_cmi5(course, htmls, out_zip, recursos_dir=recursos_arg)
     return jsonify({"ok": True, "filename": out_zip.name})
+
+
+@app.route("/api/curso/<token>/ai-enrich-all", methods=["POST"])
+@login_required
+def course_ai_enrich_all(token):
+    """Aplica de un solo clic a TODOS los temas:
+      1. Genera tags (5-6 por tema) si el tema aún no tiene ninguno.
+      2. Sugiere y aplica callouts automáticamente (sin pasar por modal).
+      3. Genera un quiz mixto (test + V/F + huecos) si el tema tiene < 3 preguntas.
+
+    Crea UNA snapshot al inicio del proceso por si el usuario quiere revertir.
+    Devuelve un resumen detallado por tema con tags, callouts y quiz generados.
+
+    Es deliberadamente NO destructivo:
+      - No toca tags ya existentes (solo añade si están vacíos).
+      - No reemplaza quizzes que ya tengan 3+ preguntas (respeta los manuales).
+      - Si la IA no devuelve nada útil para un tema, lo deja como estaba.
+    """
+    from scorm_builder.ai_assist import (
+        is_available, generate_tags, enrich_topic_with_callouts,
+        generate_quiz, QuizConfig,
+    )
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    job_dir = Path(row["zip_path"]).parent
+    structure_path = job_dir / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    # Snapshot previo (uno solo para todo el batch)
+    snap_id = _save_snapshot(job_dir, label="pre_enrich_all")
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    topics = data.get("topics", [])
+
+    valid_callout_types = {
+        "callout_key", "callout_alert", "callout_warn",
+        "callout_success", "quote",
+    }
+    total_tags = 0
+    total_callouts = 0
+    total_quiz_final = 0
+    total_quiz_inline = 0
+    details = []
+    errors = []
+
+    # Configuración fija del quiz mixto que aplicamos cuando el tema lo necesita
+    QUIZ_CFG = QuizConfig(
+        location="final",
+        types=["multiple_choice", "true_false", "fill_in"],
+        n_questions=5,
+    )
+    QUIZ_MIN_THRESHOLD = 3  # si el tema tiene menos preguntas que esto, generamos
+
+    for ti, topic in enumerate(topics):
+        t_detail = {
+            "topic": ti + 1,
+            "title": topic.get("title", "")[:60],
+            "tags": 0, "callouts": 0,
+            "quiz_final": 0, "quiz_inline": 0,
+        }
+
+        # 1) Tags si están vacíos
+        if not topic.get("tags"):
+            try:
+                tags = generate_tags(topic, n=6)
+                if tags:
+                    topic["tags"] = tags
+                    t_detail["tags"] = len(tags)
+                    total_tags += len(tags)
+            except Exception as e:
+                errors.append(f"Tema {ti+1}: tags falló — {e}")
+
+        # 2) Enrich con callouts
+        try:
+            result = enrich_topic_with_callouts(topic)
+            if result and result.get("suggestions"):
+                sub_by_id = {s.get("id"): s for s in topic.get("subsections", [])}
+                applied = 0
+                for s in result["suggestions"]:
+                    sub_id = s.get("subsection_id")
+                    bi = s.get("block_index")
+                    new_type = s.get("suggested_type", "")
+                    new_text = (s.get("suggested_text") or "").strip()
+                    sub = sub_by_id.get(sub_id)
+                    if not sub or new_type not in valid_callout_types or not new_text:
+                        continue
+                    blocks = sub.get("blocks", [])
+                    try:
+                        bi = int(bi)
+                    except (TypeError, ValueError):
+                        continue
+                    if bi < 0 or bi >= len(blocks):
+                        continue
+                    block = blocks[bi]
+                    if block.get("type") != "paragraph":
+                        continue
+                    block["type"] = new_type
+                    block["text"] = new_text
+                    block["text_html"] = None
+                    applied += 1
+                t_detail["callouts"] = applied
+                total_callouts += applied
+        except Exception as e:
+            errors.append(f"Tema {ti+1}: callouts falló — {e}")
+
+        # 3) Quiz mixto si el tema tiene menos de 3 preguntas
+        current_quiz_n = len(topic.get("quiz", []))
+        if current_quiz_n < QUIZ_MIN_THRESHOLD:
+            try:
+                quiz_result = generate_quiz(topic, config=QUIZ_CFG)
+                if quiz_result and (quiz_result.get("final") or quiz_result.get("by_subsection")):
+                    final_qs = quiz_result.get("final", []) or []
+                    by_sub = quiz_result.get("by_subsection", {}) or {}
+                    # Sustituye porque current_quiz_n < 3 (poco que preservar)
+                    topic["quiz"] = [{**q} for q in final_qs]
+                    # inline_quiz: fusionamos por subapartado (no machacamos los existentes
+                    # si ya había algunos manuales)
+                    existing_inline = topic.get("inline_quiz") or {}
+                    for sub_id, qs in by_sub.items():
+                        if sub_id not in existing_inline:
+                            existing_inline[sub_id] = [{**q} for q in qs]
+                    topic["inline_quiz"] = existing_inline
+                    t_detail["quiz_final"] = len(final_qs)
+                    t_detail["quiz_inline"] = sum(len(v) for v in by_sub.values())
+                    total_quiz_final += t_detail["quiz_final"]
+                    total_quiz_inline += t_detail["quiz_inline"]
+            except Exception as e:
+                errors.append(f"Tema {ti+1}: quiz falló — {e}")
+
+        details.append(t_detail)
+
+    with open(structure_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return jsonify({
+        "ok": True,
+        "snapshot_id": snap_id,
+        "summary": {
+            "topics_processed": len(topics),
+            "tags_generated": total_tags,
+            "callouts_applied": total_callouts,
+            "quiz_final_generated": total_quiz_final,
+            "quiz_inline_generated": total_quiz_inline,
+            "errors": errors,
+        },
+        "details": details,
+    })
 
 
 # Ruta global para descargar la plantilla Word moderna
@@ -5280,7 +5562,7 @@ def _gen_readme(course_data: dict, num_hours: float, target: Path) -> Path:
         for s in t.get("subsections", []):
             lines.append(f"      {s.get('number', '')}  {s.get('title', '')}")
     lines.append("")
-    lines.append("Generado con SCORM Builder v0.5")
+    lines.append("Generado con SCORM Builder v0.5.1")
     target.write_text("\n".join(lines), encoding="utf-8")
     return target
 
@@ -5860,7 +6142,7 @@ def open_browser():
 def main():
     print()
     print("=" * 60)
-    print("  SCORM Builder · App web v0.5")
+    print("  SCORM Builder · App web v0.5.1")
     print("=" * 60)
     print()
     print(f"  Carpeta de trabajo: {APP_DIR}")
