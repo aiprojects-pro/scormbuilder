@@ -90,3 +90,70 @@ def build_aiken_file(
             generated.append(output_path)
 
     return generated
+
+
+# ============================================================
+# BANCO AIKEN EXTENDIDO CON IA (v0.5 Fase 2)
+# Genera 30-50 preguntas adicionales por tema usando Claude, para que el
+# formador tenga un banco amplio que importar en Moodle como cuestionario
+# separado (independiente del quiz embebido en el SCORM).
+# ============================================================
+
+def build_extended_aiken(
+    course: CourseStructure,
+    output_dir: Path,
+    n_questions_per_topic: int = 30,
+) -> List[Path]:
+    """Genera un .txt Aiken por tema con N preguntas adicionales generadas por IA.
+
+    Requiere ANTHROPIC_API_KEY. Si no está disponible, devuelve lista vacía
+    sin error.
+
+    Args:
+        course: estructura del curso
+        output_dir: directorio donde se generarán los .txt
+        n_questions_per_topic: número objetivo de preguntas por tema
+
+    Returns:
+        lista de ficheros generados (uno por tema si la IA respondió)
+    """
+    from scorm_builder.ai_assist import is_available, generate_extended_aiken
+
+    if not is_available():
+        return []
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated: List[Path] = []
+
+    for topic in course.topics:
+        questions = generate_extended_aiken(topic, n_questions=n_questions_per_topic)
+        if not questions:
+            continue
+
+        lines = []
+        lines.append("// =====================================================================")
+        lines.append(f"// Curso: {course.metadata.title}")
+        lines.append(f"// Tema {topic.number}: {topic.title}")
+        lines.append(f"// Banco AMPLIADO (generado por IA) — {len(questions)} preguntas")
+        lines.append(f"// Para importar en Moodle como cuestionario separado")
+        lines.append("// Codificación: UTF-8")
+        lines.append("// =====================================================================")
+        lines.append("")
+
+        for q in questions:
+            lines.append(q["text"])
+            for idx, opt in enumerate(q["options"]):
+                letter = chr(ord("A") + idx)
+                lines.append(f"{letter}. {opt}")
+            correct_letter = chr(ord("A") + q["correct_index"])
+            lines.append(f"ANSWER: {correct_letter}")
+            if q.get("explanation"):
+                lines.append(f"// Explicación: {q['explanation']}")
+            lines.append("")
+
+        fname = output_dir / f"aiken_T{topic.number:02d}_extendido.txt"
+        fname.write_text("\n".join(lines), encoding="utf-8")
+        generated.append(fname)
+
+    return generated

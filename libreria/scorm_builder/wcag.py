@@ -47,6 +47,27 @@ class WCAGReport:
             "issues": [asdict(i) for i in self.issues],
         }
 
+    def summary(self) -> str:
+        """Devuelve un resumen breve para mostrar al usuario."""
+        if self.passes:
+            return f"WCAG OK ({self.n_warnings} avisos no bloqueantes)"
+        errs = [i for i in self.issues if i.severity == "error"]
+        lines = [f"Bloqueado por {self.n_errors} error(es) WCAG 2.1 AA:"]
+        for i in errs[:5]:
+            loc = f" [{i.location}]" if i.location else ""
+            lines.append(f"  · {i.code} — {i.title}{loc}")
+        if len(errs) > 5:
+            lines.append(f"  ... y {len(errs) - 5} más")
+        return "\n".join(lines)
+
+
+class WCAGValidationError(Exception):
+    """Lanzada cuando el validador WCAG encuentra errores bloqueantes y
+    `strict_wcag=True` está activo."""
+    def __init__(self, report: WCAGReport):
+        self.report = report
+        super().__init__(report.summary())
+
 
 # ---------------------------------------------------------------
 # Cálculo de contraste (WCAG 2.1)

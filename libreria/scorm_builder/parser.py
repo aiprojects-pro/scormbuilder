@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import logging
+import tempfile
 import unicodedata
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -21,6 +22,10 @@ from typing import List, Dict, Optional, Any
 from enum import Enum
 
 from docx import Document
+
+from scorm_builder.inline import (
+    ImageExtractor, ExtraBlock, process_paragraph_inline, get_plain_text, is_video_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +58,39 @@ class BlockType(str, Enum):
 
 @dataclass
 class Block:
-    """Un bloque de contenido dentro de un subapartado."""
+    """Un bloque de contenido dentro de un subapartado.
+
+    Campos enriquecidos (v0.5):
+      - `text_html`: HTML preservando negritas, cursivas, enlaces, etc. Si está
+        presente, el renderer lo usa SIN volver a escapar. Cuando es None, se
+        cae a `text` (plano) y se escapa.
+      - `items_html`: equivalente a `text_html` para items de lista.
+      - `rows_html`: equivalente para celdas de tabla.
+    """
     type: BlockType
     text: str = ""
     items: List[str] = field(default_factory=list)
     rows: List[List[str]] = field(default_factory=list)  # solo TABLE
     extras: Dict[str, str] = field(default_factory=dict)  # ANALISIS, REFLEXION, file, src, ...
+    text_html: Optional[str] = None  # v0.5: HTML inline preservado
+    items_html: Optional[List[str]] = None  # v0.5: HTML inline por item
+    rows_html: Optional[List[List[str]]] = None  # v0.5: HTML inline por celda
 
 
 @dataclass
 class Question:
-    """Una pregunta del quiz."""
+    """Una pregunta del quiz.
+
+    v0.5 Fase 2: `qtype` permite distintos tipos:
+      - "multiple_choice": opción múltiple (4 opciones por defecto). DEFAULT.
+      - "true_false": verdadero/falso (options = ["Verdadero", "Falso"]).
+      - "fill_in": completar hueco (texto con "___", opciones = posibles palabras).
+    """
     text: str
     options: List[str]
     correct_index: int  # 0=A, 1=B, 2=C, 3=D
     explanation: Optional[str] = None
+    qtype: str = "multiple_choice"
 
 
 @dataclass
@@ -87,6 +110,13 @@ class Topic:
     subsections: List[Subsection] = field(default_factory=list)
     quiz: List[Question] = field(default_factory=list)
     intro: Optional[str] = None  # texto antes del primer subapartado
+    # v0.5 Fase 2: etiquetas temáticas (5-8) generadas por IA o manuales.
+    # Se inyectan como <keyword> en el manifest SCORM y como chips visibles
+    # bajo el título del tema en el HTML.
+    tags: List[str] = field(default_factory=list)
+    # v0.5 Fase 2: preguntas intercaladas por subapartado, mapeo {sub_id: [Question, ...]}.
+    # Se renderizan al final de cada subapartado correspondiente.
+    inline_quiz: Dict[str, List["Question"]] = field(default_factory=dict)
 
 
 @dataclass
@@ -111,6 +141,11 @@ class CourseStructure:
     metadata: CourseMetadata
     topics: List[Topic] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # v0.5: imágenes incrustadas extraídas del DOCX. Ruta de la carpeta y
+    # lista de nombres de fichero. La carpeta debe pasarse al packager como
+    # parte de recursos_dir para que las imágenes acaben dentro del SCORM.
+    extracted_images_dir: Optional[str] = None
+    extracted_image_files: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +155,7 @@ class CourseStructure:
                     "number": t.number,
                     "title": t.title,
                     "intro": t.intro,
+                    "tags": list(t.tags),
                     "subsections": [
                         {
                             "id": s.id,
@@ -132,6 +168,9 @@ class CourseStructure:
                                     "items": b.items,
                                     "rows": b.rows,
                                     "extras": b.extras,
+                                    "text_html": b.text_html,
+                                    "items_html": b.items_html,
+                                    "rows_html": b.rows_html,
                                 }
                                 for b in s.blocks
                             ],
@@ -144,9 +183,23 @@ class CourseStructure:
                             "options": q.options,
                             "correct_index": q.correct_index,
                             "explanation": q.explanation,
+                            "qtype": q.qtype,
                         }
                         for q in t.quiz
                     ],
+                    "inline_quiz": {
+                        sub_id: [
+                            {
+                                "text": q.text,
+                                "options": q.options,
+                                "correct_index": q.correct_index,
+                                "explanation": q.explanation,
+                                "qtype": q.qtype,
+                            }
+                            for q in qs
+                        ]
+                        for sub_id, qs in t.inline_quiz.items()
+                    },
                 }
                 for t in self.topics
             ],
@@ -234,6 +287,30 @@ def _detect_callout_prefix(text: str) -> Optional[BlockType]:
 def _strip_callout_prefix(text: str) -> str:
     """Elimina el prefijo [TIPO] del texto."""
     return re.sub(r"^\s*\[\w+(?:\s\w+)*\]\s*", "", text, count=1)
+
+
+def _strip_callout_prefix_html(html: str) -> str:
+    """Elimina el prefijo [TIPO] del HTML inline, incluso si está dentro de
+    tags de formato (`<strong>[CLAVE]</strong>`). Limpia las tags vacías que
+    queden tras el borrado."""
+    # 1) Eliminar el [TIPO] esté donde esté (suele venir al principio).
+    cleaned = re.sub(
+        r"\s*\[\w+(?:\s\w+)*\]\s*",
+        "",
+        html, count=1,
+    )
+    # 2) Limpiar tags de formato vacías al principio: <strong></strong>,
+    #    <em></em>, <u></u>, <s></s>. Repetir por si están anidadas.
+    for _ in range(3):
+        new = re.sub(
+            r"^\s*<(strong|em|u|s)>\s*</\1>\s*",
+            "",
+            cleaned,
+        )
+        if new == cleaned:
+            break
+        cleaned = new
+    return cleaned.strip()
 
 
 def _looks_like_heading1(text: str) -> bool:
@@ -402,6 +479,28 @@ def _extract_table_rows(table) -> List[List[str]]:
     return rows
 
 
+def _extract_table_rows_html(table, doc, extractor) -> tuple[List[List[str]], List[ExtraBlock]]:
+    """Extrae las filas como HTML enriquecido (cada celda preserva enlaces y formato).
+    Devuelve (rows_html, extras_no_inline). Los extras (imágenes en celdas) se
+    pierden en este formato porque ir a la celda complica mucho; los devolvemos
+    para emitirlos tras la tabla.
+    """
+    rows_html: List[List[str]] = []
+    extras_collected: List[ExtraBlock] = []
+    for row in table.rows:
+        row_html = []
+        for cell in row.cells:
+            cell_parts = []
+            for p in cell.paragraphs:
+                inline_html, extras = process_paragraph_inline(p, doc, extractor)
+                if inline_html.strip():
+                    cell_parts.append(inline_html.strip())
+                extras_collected.extend(extras)
+            row_html.append("<br>".join(cell_parts))
+        rows_html.append(row_html)
+    return rows_html, extras_collected
+
+
 def _is_list_paragraph(p) -> Optional[BlockType]:
     """Detecta si un párrafo es de lista y de qué tipo."""
     style_name = _safe_style_name(p)
@@ -448,8 +547,21 @@ def _build_media_block(callout_type: BlockType, clean_text: str) -> Optional[Blo
     )
 
 
-def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructure:
-    """Parsea un archivo DOCX y devuelve una CourseStructure."""
+def parse_docx(
+    path: str | Path,
+    default_palette: str = "azul",
+    images_dir: str | Path | None = None,
+) -> CourseStructure:
+    """Parsea un archivo DOCX y devuelve una CourseStructure.
+
+    Args:
+        path: ruta al DOCX
+        default_palette: paleta por defecto si no se indica en metadatos
+        images_dir: carpeta donde extraer las imágenes incrustadas del DOCX.
+            Si es None, se crea una temporal. La ruta queda en
+            `course.extracted_images_dir` para que el caller pueda incluirla
+            como recursos en el SCORM.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Archivo no encontrado: {path}")
@@ -457,6 +569,15 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
     doc = Document(str(path))
 
     course = CourseStructure(metadata=CourseMetadata(palette=default_palette))
+
+    # v0.5: extractor de imágenes incrustadas
+    if images_dir is None:
+        images_dir = Path(tempfile.mkdtemp(prefix="scormbuilder_imgs_"))
+    else:
+        images_dir = Path(images_dir)
+        images_dir.mkdir(parents=True, exist_ok=True)
+    extractor = ImageExtractor(doc, images_dir)
+    course.extracted_images_dir = str(images_dir)
 
     # Iterar todos los bloques del cuerpo (párrafos + tablas en orden)
     body_elements = []
@@ -483,20 +604,50 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
     current_subsection: Optional[Subsection] = None
     in_quiz = False
     quiz_buffer: List[str] = []
-    list_buffer: List[str] = []
+    list_buffer: List[str] = []  # texto plano (compatibilidad)
+    list_buffer_html: List[str] = []  # html enriquecido por item
+    list_buffer_extras: List[ExtraBlock] = []  # imágenes / vídeos pendientes
     list_type: Optional[BlockType] = None
     intro_buffer: List[str] = []  # texto antes del primer h2 de cada tema
 
     p_index = 0
 
     def flush_list():
-        nonlocal list_buffer, list_type
+        nonlocal list_buffer, list_buffer_html, list_buffer_extras, list_type
         if list_buffer and current_subsection and list_type:
-            current_subsection.blocks.append(
-                Block(type=list_type, items=list_buffer.copy())
-            )
+            block = Block(type=list_type, items=list_buffer.copy())
+            # Si hay html enriquecido en algún item, lo añadimos
+            if any(h is not None for h in list_buffer_html):
+                # Para items sin html (raros) caemos a escape del texto plano
+                import html as _html
+                block.items_html = [
+                    h if h is not None else _html.escape(t, quote=False)
+                    for h, t in zip(list_buffer_html, list_buffer)
+                ]
+            current_subsection.blocks.append(block)
+            # Emitir extras pendientes (imágenes/vídeos que iban en los items)
+            for ex in list_buffer_extras:
+                _emit_extra_block(current_subsection, ex)
             list_buffer = []
+            list_buffer_html = []
+            list_buffer_extras = []
             list_type = None
+
+    def _emit_extra_block(target_sub: "Subsection", ex: ExtraBlock):
+        """Convierte un ExtraBlock (imagen/vídeo extraído) en un Block y lo añade."""
+        if ex.type == "image":
+            target_sub.blocks.append(Block(
+                type=BlockType.IMAGE,
+                text=ex.caption,
+                extras={"src": ex.src, "file": ex.src,
+                        **{k: str(v) for k, v in ex.extras.items()}},
+            ))
+        elif ex.type == "video_embed":
+            target_sub.blocks.append(Block(
+                type=BlockType.VIDEO,
+                text=ex.caption,
+                extras={"src": ex.src, "file": ex.src},
+            ))
 
     def flush_quiz():
         nonlocal quiz_buffer, in_quiz
@@ -531,12 +682,20 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
                 flush_list()
                 rows = _extract_table_rows(el)
                 if rows:
-                    current_subsection.blocks.append(Block(type=BlockType.TABLE, rows=rows))
+                    rows_html, table_extras = _extract_table_rows_html(el, doc, extractor)
+                    current_subsection.blocks.append(
+                        Block(type=BlockType.TABLE, rows=rows, rows_html=rows_html)
+                    )
+                    # Si había imágenes dentro de la tabla, emitirlas debajo
+                    for ex in table_extras:
+                        _emit_extra_block(current_subsection, ex)
             continue
 
         # Es un párrafo
         p = el
-        text = p.text.strip()
+        # v0.5: get_plain_text es como p.text pero más consistente con
+        # cómo trataremos hyperlinks. Para detectar headings, callouts, etc.
+        text = get_plain_text(p).strip()
         style_name = _safe_style_name(p)
 
         # ---- HEADINGS (con respaldo por patrón de texto) ----
@@ -621,6 +780,14 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
                 current_subsection.blocks.append(Block(type=BlockType.HEADING_4, text=text))
             continue
 
+        # v0.5: Antes de cualquier otra cosa, procesar inline el párrafo.
+        # Esto extrae imágenes, hipervínculos y URLs sueltas. Si el párrafo SOLO
+        # contiene una imagen incrustada (sin texto), saldrá text="" pero un
+        # ExtraBlock de imagen.
+        inline_html, extras = process_paragraph_inline(p, doc, extractor)
+        # Detectar si el párrafo está vacío de texto pero trae extras
+        text_clean = re.sub(r"<[^>]+>", "", inline_html).strip()
+
         # Lista (bullet o number)
         list_kind = _is_list_paragraph(p)
         if list_kind and text:
@@ -628,6 +795,9 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
                 flush_list()
             list_type = list_kind
             list_buffer.append(text)
+            list_buffer_html.append(inline_html if text_clean else None)
+            # Los extras del item se acumulan y se emiten al cerrar la lista
+            list_buffer_extras.extend(extras)
             continue
         else:
             flush_list()
@@ -638,14 +808,25 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
                 intro_buffer.append(text)
             continue
 
+        # Caso: párrafo sin texto pero con extras (imagen suelta en el Word)
+        if not text and extras:
+            for ex in extras:
+                _emit_extra_block(current_subsection, ex)
+            continue
+
         # Detectar callout / multimedia
         if text:
             callout_type = _detect_callout_prefix(text)
             if callout_type:
                 clean = _strip_callout_prefix(text)
+                # Para el callout también queremos preservar el HTML inline,
+                # pero el prefijo [TIPO] está en el HTML — lo quitamos del HTML.
+                clean_html = _strip_callout_prefix_html(inline_html)
                 # Casos especiales con archivo asociado
                 if callout_type == BlockType.QUOTE:
-                    current_subsection.blocks.append(Block(type=callout_type, text=clean))
+                    current_subsection.blocks.append(
+                        Block(type=callout_type, text=clean, text_html=clean_html)
+                    )
                 elif callout_type in (
                     BlockType.DOWNLOAD, BlockType.IMAGE, BlockType.VIDEO,
                     BlockType.AUDIO, BlockType.EMBED, BlockType.RESOURCE,
@@ -653,13 +834,26 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
                     media_block = _build_media_block(callout_type, clean)
                     if media_block:
                         current_subsection.blocks.append(media_block)
+                    # También emitimos los extras del propio párrafo
+                    for ex in extras:
+                        _emit_extra_block(current_subsection, ex)
                     continue
                 else:
-                    current_subsection.blocks.append(Block(type=callout_type, text=clean))
+                    current_subsection.blocks.append(
+                        Block(type=callout_type, text=clean, text_html=clean_html)
+                    )
+                # Emitir extras (vídeos YouTube, imágenes) detectados en el callout
+                for ex in extras:
+                    _emit_extra_block(current_subsection, ex)
                 continue
 
-            # Párrafo normal
-            current_subsection.blocks.append(Block(type=BlockType.PARAGRAPH, text=text))
+            # Párrafo normal con HTML enriquecido
+            current_subsection.blocks.append(
+                Block(type=BlockType.PARAGRAPH, text=text, text_html=inline_html)
+            )
+            # Emitir extras (imágenes/vídeos) que iban junto al texto
+            for ex in extras:
+                _emit_extra_block(current_subsection, ex)
 
     # Flush final
     flush_list()
@@ -678,6 +872,9 @@ def parse_docx(path: str | Path, default_palette: str = "azul") -> CourseStructu
 
     # Normalizar pesos del sistema de puntuación
     _normalize_weights(course)
+
+    # v0.5: registrar los archivos de imagen extraídos del DOCX
+    course.extracted_image_files = extractor.extracted_filenames()
 
     return course
 

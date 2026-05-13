@@ -39,7 +39,7 @@ MANIFEST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
           <imsmd:langstring xml:lang="es">{description}</imsmd:langstring>
         </imsmd:description>
         <imsmd:language>es</imsmd:language>
-      </imsmd:general>
+{keywords}      </imsmd:general>
     </imsmd:lom>
   </metadata>
 
@@ -154,12 +154,25 @@ def build_scorm_package(
     for rel in rel_paths:
         resource_files_xml.append(f'      <file href="{_xml_escape(rel)}"/>')
 
-    # 3. Manifest
+    # 3. Manifest (v0.5 Fase 2: incluye keywords del topic.tags)
+    keywords_xml = ""
+    tags = getattr(topic, "tags", None) or []
+    if tags:
+        kw_lines = []
+        for tag in tags:
+            kw_lines.append("        <imsmd:keyword>")
+            kw_lines.append(
+                f'          <imsmd:langstring xml:lang="es">{_xml_escape(tag)}</imsmd:langstring>'
+            )
+            kw_lines.append("        </imsmd:keyword>")
+        keywords_xml = "\n".join(kw_lines) + "\n"
+
     manifest = MANIFEST_TEMPLATE.format(
         identifier=identifier,
         title=_xml_escape(topic.title),
         description=_xml_escape(f"Tema {topic.number} del curso '{course_title}'."),
         mastery=mastery,
+        keywords=keywords_xml,
         resource_files="\n".join(resource_files_xml),
     )
     (work_dir / "imsmanifest.xml").write_text(manifest, encoding="utf-8")

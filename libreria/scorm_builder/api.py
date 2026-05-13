@@ -121,39 +121,28 @@ def build_complete_course(
     one_scorm_per_topic: bool = True,
     extra_resources: Optional[Iterable[str | Path]] = None,
     topic_title_override: Optional[str] = None,
+    strict_wcag: bool = False,
 ) -> BuildResult:
     """Construye un curso completo desde un DOCX.
 
-    Args:
-        docx_path: ruta del archivo DOCX de entrada
-        output_dir: directorio donde se generarán los archivos
-        theme: nombre de paleta predefinida o objeto Theme custom
-        custom_palette: si se pasa, sobreescribe theme con paleta personalizada
-            Debe contener: primary_deep, primary, primary_bright (mínimo)
-        title_override: si se pasa, sobreescribe el título del curso
-        author_override: si se pasa, sobreescribe el autor del curso
-        mastery_override: si se pasa, sobreescribe el % mínimo para aprobar
-        weight_view_override: si se pasa, sobreescribe el peso de la visualización (0-100).
-            Si solo se pasa este, weight_quiz se calcula como 100 - weight_view.
-        weight_quiz_override: si se pasa, sobreescribe el peso del quiz (0-100).
-        view_min_seconds_override: tiempo mínimo (segundos) por subapartado.
-        view_strategy_override: 'scroll', 'time' o 'both' (estrategia para contar como visto).
-        generate_pdfs: si True, genera un PDF por tema
-        generate_aiken: si True, genera un .txt Aiken por tema
-        one_scorm_per_topic: si True, un SCORM ZIP por tema; si False, un solo SCORM
-        extra_resources: iterable de rutas a archivos adicionales (imágenes,
-            vídeos, audios, PDFs...) que se incluirán en cada SCORM en la
-            carpeta `recursos/` y podrán ser referenciados desde el DOCX.
-
-    Returns:
-        BuildResult con la información de lo generado
+    NOVEDADES v0.5:
+    - Las imágenes incrustadas en el DOCX se extraen automáticamente y se
+      incluyen en `recursos/` del SCORM.
+    - Los hipervínculos del Word se preservan como `<a>` clicables.
+    - URLs sueltas se autolinkan; enlaces a YouTube/Vimeo se embeben como
+      reproductor en lugar de quedarse como texto.
+    - El SCORM lleva un botón visible "Descargar apuntes (PDF)" en la cabecera.
+    - El HTML aplica WCAG 2.1 AA (skip-link, foco visible, aria-live, etc.).
+    - Nuevo flag `strict_wcag`: si True y la validación encuentra errores
+      bloqueantes (alt vacío, contraste bajo), se lanza `WCAGValidationError`.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Parsear DOCX
+    # 1. Parsear DOCX (extrae imágenes incrustadas a una carpeta temporal)
     logger.info(f"Parseando {docx_path}...")
-    course = parse_docx(docx_path)
+    images_dir = output_dir / "_extracted_images"
+    course = parse_docx(docx_path, images_dir=images_dir)
     if title_override:
         course.metadata.title = title_override
     if author_override:
@@ -219,13 +208,10 @@ def build_complete_course(
         else:
             theme_obj = get_theme(theme)
 
-    # 3. Renderizar HTMLs
-    logger.info(f"Renderizando {len(course.topics)} temas con paleta '{theme_obj.name}'...")
-    htmls = render_html(course, theme_obj)
-
-    # 4. Generar PDFs
+    # 3. Generar PDFs (antes del render para conocer los nombres y añadir el botón)
     pdf_files: List[Path] = []
-    descargas_dir = None
+    pdf_filenames: Dict[int, str] = {}
+    descargas_dir: Optional[Path] = None
     if generate_pdfs and course.topics:
         logger.info("Generando PDFs descargables...")
         descargas_dir = output_dir / "_descargas_temp"
@@ -236,11 +222,33 @@ def build_complete_course(
                 pdf_path = descargas_dir / pdf_name
                 build_pdf(topic, course, theme_obj, pdf_path)
                 pdf_files.append(pdf_path)
+                pdf_filenames[topic.number] = pdf_name
             except Exception as e:
                 logger.warning(f"No se pudo generar PDF del tema {topic.number}: {e}")
                 course.warnings.append(
                     f"No se pudo generar el PDF del tema {topic.number}: {e}"
                 )
+
+    # 3b. Validación WCAG (opcional bloqueante)
+    try:
+        from scorm_builder.wcag import validate_course, WCAGValidationError
+        recursos_dir_for_wcag = None
+        if extra_resources:
+            # Reusamos la primera carpeta de extras para comprobar .vtt si la hay
+            recursos_dir_for_wcag = None  # se evalúa solo paleta + alts
+        report = validate_course(course, recursos_dir=recursos_dir_for_wcag)
+        # Adjuntar warnings WCAG al course
+        for issue in report.issues:
+            if issue.severity == "warning":
+                course.warnings.append(f"[WCAG {issue.code}] {issue.title} — {issue.description}")
+        if strict_wcag and not report.passes:
+            raise WCAGValidationError(report)
+    except ImportError:
+        pass  # módulo no disponible (no debería pasar)
+
+    # 4. Renderizar HTMLs (con botones PDF si se generaron)
+    logger.info(f"Renderizando {len(course.topics)} temas con paleta '{theme_obj.name}'...")
+    htmls = render_html(course, theme_obj, pdf_filenames=pdf_filenames)
 
     # 5. Generar Aiken
     aiken_files: List[Path] = []
@@ -250,12 +258,22 @@ def build_complete_course(
         aiken_files = build_aiken_file(course, aiken_dir, one_per_topic=True)
 
     # 6. Preparar carpeta de recursos extra (multimedia, PDFs adicionales, etc.)
+    # v0.5: también incluimos las imágenes extraídas del DOCX automáticamente.
     recursos_dir: Optional[Path] = None
     staged_resources: List[Path] = []
+    all_extra_resources: List[Path] = []
     if extra_resources:
+        all_extra_resources.extend(Path(r) for r in extra_resources if Path(r).exists())
+    # Imágenes incrustadas en el Word, ya extraídas durante el parseo
+    if course.extracted_images_dir and course.extracted_image_files:
+        for img_name in course.extracted_image_files:
+            img_path = Path(course.extracted_images_dir) / img_name
+            if img_path.exists():
+                all_extra_resources.append(img_path)
+    if all_extra_resources:
         recursos_dir = output_dir / "_recursos_temp"
-        staged_resources = _stage_extra_resources(extra_resources, recursos_dir)
-        logger.info(f"Incluidos {len(staged_resources)} recursos adicionales.")
+        staged_resources = _stage_extra_resources(all_extra_resources, recursos_dir)
+        logger.info(f"Incluidos {len(staged_resources)} recursos (extras + imágenes del DOCX).")
 
     # 7. Empaquetar SCORM
     logger.info("Empaquetando SCORMs...")
@@ -292,6 +310,15 @@ def build_complete_course(
                 final_resources.append(target)
         if recursos_dir and recursos_dir.exists():
             shutil.rmtree(recursos_dir, ignore_errors=True)
+
+    # 10. Limpiar carpeta temporal de imágenes extraídas (ya están copiadas)
+    if course.extracted_images_dir:
+        try:
+            ext_dir = Path(course.extracted_images_dir)
+            if ext_dir.exists() and ext_dir.parent == output_dir:
+                shutil.rmtree(ext_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     return BuildResult(
         course=course,
@@ -407,6 +434,7 @@ def course_from_dict(data: dict) -> CourseStructure:
             number=int(t_data.get("number", 1)),
             title=t_data.get("title", ""),
             intro=t_data.get("intro"),
+            tags=list(t_data.get("tags", []) or []),
         )
         for s_data in t_data.get("subsections", []):
             sub = Subsection(
@@ -420,12 +448,18 @@ def course_from_dict(data: dict) -> CourseStructure:
                     bt = BlockType(bt_str)
                 except ValueError:
                     bt = BlockType.PARAGRAPH
+                # v0.5: preservar campos de HTML enriquecido si están en el dict
+                items_html = b_data.get("items_html")
+                rows_html = b_data.get("rows_html")
                 sub.blocks.append(Block(
                     type=bt,
                     text=b_data.get("text", ""),
                     items=list(b_data.get("items", [])),
                     rows=[list(r) for r in b_data.get("rows", [])],
                     extras=dict(b_data.get("extras", {})),
+                    text_html=b_data.get("text_html"),
+                    items_html=list(items_html) if items_html else None,
+                    rows_html=[list(r) for r in rows_html] if rows_html else None,
                 ))
             topic.subsections.append(sub)
         for q_data in t_data.get("quiz", []):
@@ -434,7 +468,20 @@ def course_from_dict(data: dict) -> CourseStructure:
                 options=list(q_data.get("options", [])),
                 correct_index=int(q_data.get("correct_index", 0)),
                 explanation=q_data.get("explanation"),
+                qtype=q_data.get("qtype", "multiple_choice"),
             ))
+        # v0.5 Fase 2: inline_quiz por subapartado
+        for sub_id, qs in (t_data.get("inline_quiz") or {}).items():
+            topic.inline_quiz[sub_id] = [
+                Question(
+                    text=q.get("text", ""),
+                    options=list(q.get("options", [])),
+                    correct_index=int(q.get("correct_index", 0)),
+                    explanation=q.get("explanation"),
+                    qtype=q.get("qtype", "multiple_choice"),
+                )
+                for q in qs if isinstance(q, dict)
+            ]
         course.topics.append(topic)
     course.warnings = list(data.get("warnings", []))
     return course

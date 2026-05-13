@@ -4,6 +4,8 @@
 
 Este repositorio contiene el **motor** que genera paquetes SCORM 1.2 a partir de archivos `.docx` que siguen una convención sencilla. Es el núcleo de la plataforma SaaS en construcción y también funciona como herramienta de línea de comandos para uso personal.
 
+> **Versión 0.5** (Fases 1 → 5, completa) — **Fase 1**: extracción automática de imágenes, hipervínculos preservados, YouTube embebido, PDF descargable, WCAG 2.1 AA. **Fase 2**: IA centralizada, tags por tema, quizzes mixtos (test / V-F / huecos), exporter IMS CP, banco Aiken extendido por IA. **Fase 3**: UI completa en editor para endpoints IA. **Fase 4**: alt-text IA por imagen, modal WCAG, vista previa en iframe. **Fase 5**: enriquecer Word desordenado con callouts IA, plantilla Word moderna descargable, exporter cmi5/xAPI, comparador antes/después por snapshots, detección de copyright en imágenes. Ver [`MEJORAS_v0.5.md`](MEJORAS_v0.5.md), [`MEJORAS_v0.5_fase2.md`](MEJORAS_v0.5_fase2.md), [`MEJORAS_v0.5_fase3.md`](MEJORAS_v0.5_fase3.md), [`MEJORAS_v0.5_fase4.md`](MEJORAS_v0.5_fase4.md) y [`MEJORAS_v0.5_fase5.md`](MEJORAS_v0.5_fase5.md).
+>
 > **Versión 0.4** — Asistente IA en el editor (reescritura, objetivos, resumen, glosario, ilustraciones), validador WCAG 2.1 AA, subtítulos automáticos para vídeos (Whisper), narración TTS, modo constructor visual completo, exports HTML standalone y SCORM 2004. Ver [`MEJORAS_v0.4.md`](MEJORAS_v0.4.md).
 >
 > **Versión 0.3** — Sistema de puntuación ponderada (visualización + quiz), edición desde la app sin volver al Word, vista previa antes de empaquetar y generación de quiz por IA. Ver [`MEJORAS_v0.3.md`](MEJORAS_v0.3.md).

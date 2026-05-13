@@ -295,7 +295,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.4.3</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -492,6 +492,7 @@ HOME_BODY_TEMPLATE = """
     <p class="hint" id="docxHint" style="margin-top:0.6rem;">
       Solo se acepta <code>.docx</code>. Si el documento sigue la plantilla del proyecto,
       detectaremos automáticamente los temas, subapartados, callouts, ejemplos y quiz.
+      <br>¿Sin plantilla? <a href="/plantilla/descargar" style="font-weight:600;">📥 Descarga la plantilla Word</a> con la convención aplicada.
     </p>
   </div>
 
@@ -1768,6 +1769,25 @@ def course_edit(token):
         if (t.intro != null) {{
           html += '<label class="ed-block">Introducción<textarea data-topic="' + ti + '" data-field="intro">' + escapeHtml(t.intro) + '</textarea></label>';
         }}
+
+        // ----- TAGS / ETIQUETAS DEL TEMA (v0.5 Fase 3) -----
+        const tags = Array.isArray(t.tags) ? t.tags : [];
+        html += '<div class="ed-tags-block" data-topic="' + ti + '">';
+        html += '<label class="ed-tags-label">🏷 Etiquetas del tema <span class="ed-tags-hint">(se incluyen en el manifest SCORM como keywords y aparecen como chips bajo el título)</span></label>';
+        html += '<ul class="ed-tags-list" data-topic="' + ti + '">';
+        tags.forEach((tag, tagi) => {{
+          html += '<li class="ed-tag-chip">';
+          html += escapeHtml(tag);
+          html += '<button type="button" class="ed-tag-del" data-topic="' + ti + '" data-tag-index="' + tagi + '" title="Quitar etiqueta" aria-label="Quitar etiqueta">×</button>';
+          html += '</li>';
+        }});
+        html += '</ul>';
+        html += '<div class="ed-tags-actions">';
+        html += '<input type="text" class="ed-tag-input" data-topic="' + ti + '" placeholder="Escribe una etiqueta y pulsa Enter">';
+        html += '<button type="button" class="btn-ai-mini" data-topic-ai="tags" data-topic="' + ti + '">🏷 Generar tags con IA</button>';
+        html += '</div>';
+        html += '</div>';
+
         // Subapartados
         t.subsections.forEach((s, si) => {{
           html += '<div class="ed-sub">';
@@ -1840,7 +1860,39 @@ def course_edit(token):
         html += '<div class="ed-topic-ai">';
         html += '<button type="button" class="btn-ai-mini" data-topic-ai="objectives" data-topic="' + ti + '">🎯 Generar objetivos de aprendizaje</button>';
         html += '<button type="button" class="btn-ai-mini" data-topic-ai="summary" data-topic="' + ti + '">📝 Generar resumen final</button>';
+        html += '<button type="button" class="btn-ai-mini" data-topic-ai="enrich" data-topic="' + ti + '">✨ Enriquecer con callouts IA</button>';
         html += '</div>';
+
+        // ----- ASISTENTE IA AVANZADO (v0.5 Fase 3, colapsable) -----
+        const inlineCount = t.inline_quiz ? Object.values(t.inline_quiz).reduce((s, arr) => s + (arr ? arr.length : 0), 0) : 0;
+        html += '<details class="ed-ai-advanced" data-topic="' + ti + '">';
+        html += '<summary>⚙️ Asistente IA avanzado — configurador de quiz por tipos y bancos</summary>';
+        html += '<div class="ed-ai-advanced-body">';
+
+        // Configurador de quiz
+        html += '<fieldset class="ed-quiz-config" data-topic="' + ti + '">';
+        html += '<legend>Generador de quiz configurable</legend>';
+        html += '<div class="ed-quiz-config-grid">';
+        html += '<label>Ubicación<select class="ed-qc-location" data-topic="' + ti + '">';
+        html += '<option value="final">Bloque final del tema (clásico)</option>';
+        html += '<option value="per_subsection">Una pregunta de repaso por cada subapartado</option>';
+        html += '<option value="mixed">Mixto: repaso por subapartado + bloque final</option>';
+        html += '</select></label>';
+        html += '<label>Nº preguntas (bloque final)<input type="number" class="ed-qc-n" data-topic="' + ti + '" min="1" max="15" value="5"></label>';
+        html += '</div>';
+        html += '<div class="ed-quiz-config-types">';
+        html += '<label><input type="checkbox" class="ed-qc-type" data-topic="' + ti + '" value="multiple_choice" checked> Test (4 opciones)</label>';
+        html += '<label><input type="checkbox" class="ed-qc-type" data-topic="' + ti + '" value="true_false"> Verdadero / Falso</label>';
+        html += '<label><input type="checkbox" class="ed-qc-type" data-topic="' + ti + '" value="fill_in"> Completar huecos</label>';
+        html += '</div>';
+        html += '<p class="ed-qc-info">⚠️ Sustituye el quiz actual y las preguntas intercaladas del tema. ';
+        if (inlineCount) html += 'Actualmente hay <strong>' + inlineCount + '</strong> pregunta(s) de repaso intercaladas.';
+        html += '</p>';
+        html += '<button type="button" class="btn-ai" data-topic-ai="quiz-config" data-topic="' + ti + '">🤖 Generar quiz con esta configuración</button>';
+        html += '</fieldset>';
+
+        html += '</div>';  // ed-ai-advanced-body
+        html += '</details>';
         // Quiz
         if (t.quiz && t.quiz.length) {{
           html += '<div class="ed-quiz"><h3>Preguntas del quiz <button type="button" class="btn-ai-mini" data-topic="' + ti + '" data-mode="extra">+ Añadir 5 más con IA</button></h3>';
@@ -1878,6 +1930,11 @@ def course_edit(token):
       html += '<a class="btn secondary" href="/curso/' + TOKEN + '">Salir</a>';
       html += '<button type="button" class="btn-ai" id="ed-glossary">📖 Generar glosario del curso con IA</button>';
       html += '<button type="button" class="btn-ai" id="ed-tts">🔊 Generar narración TTS de todo el curso</button>';
+      html += '<button type="button" class="btn secondary" id="ed-wcag-check">🔍 Validar WCAG 2.1 AA</button>';
+      html += '<button type="button" class="btn secondary" id="ed-preview">👁 Vista previa del SCORM</button>';
+      html += '<button type="button" class="btn-ai" id="ed-aiken-ext">📚 Banco Aiken extendido con IA (30 pregs / tema)</button>';
+      html += '<button type="button" class="btn secondary" id="ed-export-imscp">📦 Exportar como IMS CP (Moodle)</button>';
+      html += '<button type="button" class="btn secondary" id="ed-export-cmi5">⚡ Exportar como cmi5 / xAPI</button>';
       html += '<span id="ed-dirty-indicator" style="display:' + (dirty ? 'inline-block' : 'none') + '; background:#fbbf24; color:#78350f; padding:0.3rem 0.6rem; border-radius:4px; font-size:0.8rem; font-weight:600;">● Cambios sin guardar</span>';
       html += '<span id="ed-status"></span>';
       html += '</div>';
@@ -2046,6 +2103,489 @@ def course_edit(token):
           }} finally {{
             ttsBtn.disabled = false;
             ttsBtn.textContent = orig;
+          }}
+        }};
+      }}
+
+      // ============================================================
+      // HANDLERS FASE 3 (v0.5): UI para endpoints IA de Fase 2
+      // ============================================================
+
+      // ----- TAGS: chips, añadir manual y generar con IA -----
+      // Click en × para borrar tag
+      document.querySelectorAll('.ed-tag-del').forEach(btn => {{
+        btn.onclick = () => {{
+          const ti = parseInt(btn.dataset.topic);
+          const idx = parseInt(btn.dataset.tagIndex);
+          if (!course.topics[ti].tags) course.topics[ti].tags = [];
+          course.topics[ti].tags.splice(idx, 1);
+          render(); markDirty();
+        }};
+      }});
+
+      // Pulsar Enter en el input para añadir tag manual
+      document.querySelectorAll('.ed-tag-input').forEach(inp => {{
+        inp.onkeydown = (e) => {{
+          if (e.key === 'Enter') {{
+            e.preventDefault();
+            const ti = parseInt(inp.dataset.topic);
+            const tag = inp.value.trim().toLowerCase()
+              .replace(/[^a-z0-9áéíóúñü\\s\\-]/g, '').trim();
+            if (!tag) return;
+            if (!course.topics[ti].tags) course.topics[ti].tags = [];
+            if (!course.topics[ti].tags.includes(tag)) {{
+              course.topics[ti].tags.push(tag);
+              render(); markDirty();
+            }} else {{
+              inp.value = '';
+            }}
+          }}
+        }};
+      }});
+
+      // Botón "Generar tags con IA"
+      document.querySelectorAll('[data-topic-ai="tags"]').forEach(btn => {{
+        btn.onclick = async () => {{
+          collectChanges();
+          const ti = parseInt(btn.dataset.topic);
+          const existing = course.topics[ti].tags || [];
+          if (existing.length > 0) {{
+            if (!confirm('Este tema ya tiene ' + existing.length + ' etiqueta(s). ¿Reemplazarlas por las que genere la IA?')) return;
+          }}
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-tags', {{topic_index: ti, n: 6}});
+          if (!data) return;
+          course.topics[ti].tags = data.tags || [];
+          render(); markDirty();
+          setStatus('✓ ' + (data.tags || []).length + ' etiquetas generadas para el tema. Revísalas y guarda.');
+        }};
+      }});
+
+      // ----- QUIZ CONFIGURABLE (Fase 2): location, tipos, n_questions -----
+      document.querySelectorAll('[data-topic-ai="quiz-config"]').forEach(btn => {{
+        btn.onclick = async () => {{
+          collectChanges();
+          const ti = parseInt(btn.dataset.topic);
+          const root = btn.closest('.ed-quiz-config');
+          const location = root.querySelector('.ed-qc-location').value;
+          const n = parseInt(root.querySelector('.ed-qc-n').value) || 5;
+          const types = Array.from(root.querySelectorAll('.ed-qc-type:checked')).map(c => c.value);
+          if (!types.length) {{ alert('Selecciona al menos un tipo de pregunta.'); return; }}
+
+          const inlineCount = course.topics[ti].inline_quiz
+            ? Object.values(course.topics[ti].inline_quiz).reduce((s, arr) => s + (arr ? arr.length : 0), 0)
+            : 0;
+          const finalCount = (course.topics[ti].quiz || []).length;
+          if (finalCount + inlineCount > 0) {{
+            if (!confirm('Esto reemplazará ' + finalCount + ' preguntas del bloque final y ' + inlineCount + ' intercaladas. ¿Continuar?')) return;
+          }}
+
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-quiz-config', {{
+            topic_index: ti, location: location, types: types, n_questions: n
+          }});
+          if (!data) return;
+          // Recargar estructura para reflejar lo persistido en backend
+          const r2 = await fetch('/api/curso/' + TOKEN + '/structure');
+          if (r2.ok) {{
+            course = await r2.json();
+            render(); markDirty();
+            const inlineGen = Object.values(data.by_subsection_count || {{}}).reduce((s, n) => s + n, 0);
+            setStatus('✓ Quiz generado: ' + data.final_count + ' del bloque final + ' + inlineGen + ' intercaladas. Guarda para reempaquetar.');
+          }}
+        }};
+      }});
+
+      // ----- BANCO AIKEN EXTENDIDO -----
+      const aikenBtn = document.getElementById('ed-aiken-ext');
+      if (aikenBtn) {{
+        aikenBtn.onclick = async () => {{
+          if (!confirm('Esto pedirá a la IA 30 preguntas adicionales por cada tema (banco para evaluación externa). Puede tardar varios minutos. ¿Continuar?')) return;
+          collectChanges();
+          const data = await callAI(aikenBtn, '/api/curso/' + TOKEN + '/ai-aiken-extendido', {{n: 30}});
+          if (!data) return;
+          const list = (data.files || []).map(f => '• ' + f).join('\\n');
+          alert('✓ Banco Aiken extendido generado:\\n\\n' + list + '\\n\\nLos archivos están en la carpeta del curso (aiken_extendido/). Cuando guardes el curso se incluirán en el ZIP descargable.');
+          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken extendidos generados.');
+        }};
+      }}
+
+      // ----- EXPORT IMS CONTENT PACKAGE -----
+      const imsBtn = document.getElementById('ed-export-imscp');
+      if (imsBtn) {{
+        imsBtn.onclick = async () => {{
+          if (dirty) {{
+            if (!confirm('Hay cambios sin guardar. El IMS CP se generará con la última versión guardada. ¿Continuar?')) return;
+          }}
+          imsBtn.disabled = true;
+          const orig = imsBtn.textContent;
+          imsBtn.textContent = '⏳ Empaquetando…';
+          try {{
+            const r = await fetch('/api/curso/' + TOKEN + '/export-imscp', {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}}, body: '{{}}'
+            }});
+            const data = await r.json();
+            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
+            // El backend deja el archivo en la carpeta del curso. Damos enlace de descarga.
+            window.location.href = '/curso/' + TOKEN + '/export/imscp';
+          }} catch (e) {{
+            alert('Error: ' + e.message);
+          }} finally {{
+            imsBtn.disabled = false;
+            imsBtn.textContent = orig;
+          }}
+        }};
+      }}
+
+      // ============================================================
+      // HANDLERS FASE 4: alt-text IA, WCAG check, vista previa iframe
+      // ============================================================
+
+      // ----- BOTÓN "Sugerir alt con IA" en bloques imagen -----
+      document.querySelectorAll('.ed-alt-ia').forEach(btn => {{
+        btn.onclick = async () => {{
+          collectChanges();
+          const ti = parseInt(btn.dataset.topic);
+          const si = parseInt(btn.dataset.sub);
+          const bi = parseInt(btn.dataset.block);
+          const filename = btn.dataset.filename;
+          if (!filename) {{
+            alert('El bloque no tiene archivo asociado. Pega primero el nombre del fichero en /recursos o súbelo desde el formulario inicial.');
+            return;
+          }}
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-alt-text-block',
+                                    {{filename: filename}});
+          if (!data) return;
+          // Aplicar el alt sugerido al campo "text" del bloque
+          const block = course.topics[ti].subsections[si].blocks[bi];
+          if (block) {{
+            // Preguntar si hay alt previo
+            const prev = (block.text || '').trim();
+            if (prev) {{
+              if (!confirm('La imagen ya tiene texto:\\n\\n"' + prev + '"\\n\\n¿Reemplazarlo por la sugerencia de la IA?\\n\\n"' + data.alt + '"')) return;
+            }}
+            block.text = data.alt;
+            render(); markDirty();
+            setStatus('✓ Alt-text generado: "' + data.alt + '"');
+          }}
+        }};
+      }});
+
+      // ----- BOTÓN "Validar WCAG 2.1 AA" -----
+      const wcagBtn = document.getElementById('ed-wcag-check');
+      if (wcagBtn) {{
+        wcagBtn.onclick = async () => {{
+          collectChanges();
+          // Guardar primero (silenciosamente) para que el validador lea estructura actualizada
+          if (dirty) {{
+            const r = await fetch(API_SAVE, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(course)
+            }});
+            if (!r.ok) {{
+              const errData = await r.json().catch(() => ({{}}));
+              alert('No se pudo guardar antes de validar: ' + (errData.error || 'error desconocido'));
+              return;
+            }}
+            dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
+          }}
+          const orig = wcagBtn.textContent;
+          wcagBtn.disabled = true; wcagBtn.textContent = '⏳ Validando…';
+          try {{
+            const r = await fetch('/api/curso/' + TOKEN + '/wcag-check', {{method: 'POST'}});
+            const report = await r.json();
+            if (!r.ok) {{ alert('Error: ' + (report.error || 'desconocido')); return; }}
+            showWcagModal(report);
+          }} finally {{
+            wcagBtn.disabled = false; wcagBtn.textContent = orig;
+          }}
+        }};
+      }}
+
+      function showWcagModal(report) {{
+        // Cierra modal previo si existe
+        document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'ed-modal-overlay';
+        overlay.onclick = (e) => {{ if (e.target === overlay) overlay.remove(); }};
+        const summary = report.passes
+          ? '<p class="ed-modal-ok">✓ ' + report.n_errors + ' errores bloqueantes, ' + report.n_warnings + ' avisos. <strong>Pasa la validación.</strong></p>'
+          : '<p class="ed-modal-ko">✗ ' + report.n_errors + ' errores bloqueantes, ' + report.n_warnings + ' avisos. <strong>No pasa.</strong></p>';
+        let body = '';
+        const issuesByLoc = {{}};
+        (report.issues || []).forEach(i => {{
+          const k = i.location || '(general)';
+          (issuesByLoc[k] = issuesByLoc[k] || []).push(i);
+        }});
+        Object.keys(issuesByLoc).sort().forEach(loc => {{
+          body += '<div class="wcag-loc"><h4>' + escapeHtml(loc) + '</h4><ul>';
+          issuesByLoc[loc].forEach(i => {{
+            const sevClass = 'wcag-' + i.severity;
+            const sevIcon = i.severity === 'error' ? '🔴' : (i.severity === 'warning' ? '🟡' : 'ℹ️');
+            body += '<li class="' + sevClass + '">' + sevIcon + ' <strong>' + escapeHtml(i.code) + '</strong> ' + escapeHtml(i.title) + '<br><span class="wcag-desc">' + escapeHtml(i.description) + '</span></li>';
+          }});
+          body += '</ul></div>';
+        }});
+        if (!report.issues || !report.issues.length) {{
+          body = '<p>Sin problemas detectados.</p>';
+        }}
+        overlay.innerHTML = '<div class="ed-modal-card">' +
+          '<div class="ed-modal-head"><h3>Informe WCAG 2.1 AA</h3><button type="button" class="ed-modal-close" aria-label="Cerrar">×</button></div>' +
+          '<div class="ed-modal-body">' + summary + body + '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.ed-modal-close').onclick = () => overlay.remove();
+      }}
+
+      // ----- BOTÓN "Vista previa del SCORM" -----
+      const previewBtn = document.getElementById('ed-preview');
+      if (previewBtn) {{
+        previewBtn.onclick = async () => {{
+          collectChanges();
+          if (dirty) {{
+            const r = await fetch(API_SAVE, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(course)
+            }});
+            if (!r.ok) {{
+              const errData = await r.json().catch(() => ({{}}));
+              alert('No se pudo guardar antes de previsualizar: ' + (errData.error || 'error desconocido'));
+              return;
+            }}
+            dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
+          }}
+          showPreviewModal(0);
+        }};
+      }}
+
+      function showPreviewModal(topicIndex) {{
+        document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'ed-modal-overlay';
+        overlay.onclick = (e) => {{ if (e.target === overlay) overlay.remove(); }};
+
+        // Selector de tema si hay más de uno
+        let selector = '';
+        if (course.topics.length > 1) {{
+          selector = '<select id="ed-preview-topic">';
+          course.topics.forEach((t, i) => {{
+            const sel = i === topicIndex ? ' selected' : '';
+            selector += '<option value="' + i + '"' + sel + '>Tema ' + t.number + ': ' + escapeHtml(t.title) + '</option>';
+          }});
+          selector += '</select>';
+        }}
+
+        // Selector de snapshot (versión actual vs anteriores)
+        const snapSelector = '<select id="ed-preview-snap" title="Versión: actual o snapshot anterior"><option value="">Versión actual</option></select>';
+
+        const iframeSrc = '/api/curso/' + TOKEN + '/preview-html?topic_index=' + topicIndex;
+        overlay.innerHTML = '<div class="ed-modal-card ed-modal-preview">' +
+          '<div class="ed-modal-head">' +
+            '<h3>👁 Vista previa del SCORM</h3>' +
+            selector +
+            snapSelector +
+            '<button type="button" class="ed-modal-close" aria-label="Cerrar">×</button>' +
+          '</div>' +
+          '<div class="ed-modal-body ed-modal-body-iframe">' +
+            '<iframe src="' + iframeSrc + '" title="Vista previa del tema"></iframe>' +
+          '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.ed-modal-close').onclick = () => overlay.remove();
+
+        const topicSel = overlay.querySelector('#ed-preview-topic');
+        const snapSel = overlay.querySelector('#ed-preview-snap');
+
+        function rebuildIframe() {{
+          const ti = topicSel ? parseInt(topicSel.value) : 0;
+          const snap = snapSel.value;
+          let url = '/api/curso/' + TOKEN + '/preview-html';
+          if (snap) url += '/' + encodeURIComponent(snap);
+          url += '?topic_index=' + ti;
+          overlay.querySelector('iframe').src = url;
+        }}
+        if (topicSel) topicSel.onchange = rebuildIframe;
+        if (snapSel) snapSel.onchange = rebuildIframe;
+
+        // Cargar snapshots disponibles
+        fetch('/api/curso/' + TOKEN + '/snapshots')
+          .then(r => r.json())
+          .then(data => {{
+            const snaps = (data && data.snapshots) || [];
+            if (!snaps.length) return;
+            snaps.forEach(s => {{
+              const opt = document.createElement('option');
+              opt.value = s.id;
+              opt.textContent = '📸 ' + s.id;
+              snapSel.appendChild(opt);
+            }});
+          }})
+          .catch(() => {{}});
+      }}
+
+
+      // ============================================================
+      // HANDLERS FASE 5: enrich callouts, copyright, cmi5, snapshots
+      // ============================================================
+
+      // ----- ENRICH: Sugerencias de callouts IA -----
+      document.querySelectorAll('[data-topic-ai="enrich"]').forEach(btn => {{
+        btn.onclick = async () => {{
+          collectChanges();
+          const ti = parseInt(btn.dataset.topic);
+          // Guardar antes de enviar para que la IA vea el contenido actual
+          if (dirty) {{
+            const r = await fetch(API_SAVE, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(course)
+            }});
+            if (!r.ok) {{ alert('Guarda los cambios manualmente primero.'); return; }}
+            dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
+          }}
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-enrich',
+                                    {{topic_index: ti}});
+          if (!data) return;
+          if (!data.suggestions || !data.suggestions.length) {{
+            alert('La IA no ha detectado ningún párrafo que encaje claramente con un callout.');
+            return;
+          }}
+          showEnrichModal(ti, data.suggestions, data.truncated);
+        }};
+      }});
+
+      function showEnrichModal(topicIndex, suggestions, truncated) {{
+        document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'ed-modal-overlay';
+        overlay.onclick = (e) => {{ if (e.target === overlay) overlay.remove(); }};
+
+        let body = '<p>La IA propone convertir los siguientes párrafos en callouts. ' +
+                   'Marca los que quieras aplicar y pulsa "Aplicar seleccionados".</p>';
+        if (truncated) body += '<p style="color:var(--warn);font-size:0.85rem;">⚠ Solo se muestran los primeros 30 candidatos (el tema es largo).</p>';
+        body += '<ul class="enrich-list">';
+        suggestions.forEach((s, i) => {{
+          const typeLabel = {{
+            'callout_key': '🔑 CLAVE',
+            'callout_alert': '⚠️ ALERTA',
+            'callout_warn': '⚡ CUIDADO',
+            'callout_success': '✓ ÉXITO',
+            'quote': '" CITA',
+          }}[s.suggested_type] || s.suggested_type;
+          body += '<li class="enrich-item">' +
+            '<label class="enrich-check"><input type="checkbox" class="enrich-cb" data-i="' + i + '" checked> Aplicar</label>' +
+            '<div class="enrich-type">' + typeLabel + '</div>' +
+            '<div class="enrich-reason">' + escapeHtml(s.reason || '') + '</div>' +
+            '<div class="enrich-before"><strong>Original:</strong> ' + escapeHtml(s.current_text) + '</div>' +
+            '<div class="enrich-after"><strong>Propuesto:</strong> ' + escapeHtml(s.suggested_text) + '</div>' +
+            '</li>';
+        }});
+        body += '</ul>';
+
+        overlay.innerHTML = '<div class="ed-modal-card">' +
+          '<div class="ed-modal-head">' +
+            '<h3>✨ Enriquecer con callouts IA — ' + suggestions.length + ' sugerencias</h3>' +
+            '<button type="button" class="ed-modal-close" aria-label="Cerrar">×</button>' +
+          '</div>' +
+          '<div class="ed-modal-body">' + body + '</div>' +
+          '<div class="ed-modal-foot">' +
+            '<button type="button" class="btn secondary" id="ed-enrich-toggle-all">Marcar/desmarcar todas</button>' +
+            '<button type="button" class="btn" id="ed-enrich-apply">Aplicar seleccionados</button>' +
+          '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.ed-modal-close').onclick = () => overlay.remove();
+        overlay.querySelector('#ed-enrich-toggle-all').onclick = () => {{
+          const checks = overlay.querySelectorAll('.enrich-cb');
+          const anyOff = Array.from(checks).some(c => !c.checked);
+          checks.forEach(c => c.checked = anyOff);
+        }};
+        overlay.querySelector('#ed-enrich-apply').onclick = async () => {{
+          const accepted = [];
+          overlay.querySelectorAll('.enrich-cb').forEach(c => {{
+            if (c.checked) {{
+              accepted.push(suggestions[parseInt(c.dataset.i)]);
+            }}
+          }});
+          if (!accepted.length) {{ alert('Selecciona al menos una sugerencia.'); return; }}
+          const r = await fetch('/api/curso/' + TOKEN + '/apply-enrich', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{topic_index: topicIndex, accepted: accepted}}),
+          }});
+          const data = await r.json();
+          if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
+          overlay.remove();
+          // Recargar estructura
+          const r2 = await fetch(API_GET);
+          if (r2.ok) {{
+            course = await r2.json();
+            courseSnapshot = JSON.parse(JSON.stringify(course));
+            dirty = false;
+            render();
+            setStatus('✓ ' + data.applied + ' callouts aplicados. Snapshot previo: ' + (data.snapshot_id || '—'));
+          }}
+        }};
+      }}
+
+      // ----- COPYRIGHT: análisis de imagen -----
+      document.querySelectorAll('.ed-copyright-ia').forEach(btn => {{
+        btn.onclick = async () => {{
+          const filename = btn.dataset.filename;
+          if (!filename) {{ alert('Imagen sin archivo asociado.'); return; }}
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-copyright',
+                                    {{filename: filename}});
+          if (!data) return;
+          showCopyrightModal(filename, data);
+        }};
+      }});
+
+      function showCopyrightModal(filename, report) {{
+        document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'ed-modal-overlay';
+        overlay.onclick = (e) => {{ if (e.target === overlay) overlay.remove(); }};
+        const riskClass = 'risk-' + report.risk_level;
+        const riskLabel = {{
+          'low': '✓ Riesgo bajo',
+          'medium': '⚠ Riesgo medio',
+          'high': '⛔ Riesgo alto',
+        }}[report.risk_level] || report.risk_level;
+        const concernsHtml = (report.concerns || []).map(c => '<li>' + escapeHtml(c) + '</li>').join('');
+
+        overlay.innerHTML = '<div class="ed-modal-card">' +
+          '<div class="ed-modal-head">' +
+            '<h3>⚠️ Análisis de copyright — ' + escapeHtml(filename) + '</h3>' +
+            '<button type="button" class="ed-modal-close" aria-label="Cerrar">×</button>' +
+          '</div>' +
+          '<div class="ed-modal-body">' +
+            '<div class="copy-risk ' + riskClass + '"><strong>' + riskLabel + '</strong></div>' +
+            '<p class="copy-summary">' + escapeHtml(report.summary) + '</p>' +
+            (concernsHtml ? '<h4>Elementos detectados</h4><ul class="copy-concerns">' + concernsHtml + '</ul>' : '') +
+            (report.recommendation ? '<div class="copy-reco"><strong>Recomendación:</strong> ' + escapeHtml(report.recommendation) + '</div>' : '') +
+          '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('.ed-modal-close').onclick = () => overlay.remove();
+      }}
+
+      // ----- CMI5 EXPORT -----
+      const cmi5Btn = document.getElementById('ed-export-cmi5');
+      if (cmi5Btn) {{
+        cmi5Btn.onclick = async () => {{
+          if (dirty) {{
+            if (!confirm('Hay cambios sin guardar. El paquete cmi5 se generará con la última versión guardada. ¿Continuar?')) return;
+          }}
+          const orig = cmi5Btn.textContent;
+          cmi5Btn.disabled = true; cmi5Btn.textContent = '⏳ Empaquetando…';
+          try {{
+            const r = await fetch('/api/curso/' + TOKEN + '/export-cmi5', {{method: 'POST'}});
+            const data = await r.json();
+            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
+            window.location.href = '/curso/' + TOKEN + '/export/cmi5';
+          }} finally {{
+            cmi5Btn.disabled = false; cmi5Btn.textContent = orig;
           }}
         }};
       }}
@@ -2240,9 +2780,21 @@ def course_edit(token):
       }}
       if (['image', 'video', 'audio', 'embed', 'resource', 'download'].includes(t)) {{
         const placeholder = (t === 'embed') ? 'URL de YouTube/Vimeo' : 'archivo en /recursos o URL';
+        // Si es imagen, añadimos botones "Sugerir alt" y "Comprobar copyright"
+        let altBtn = '';
+        let copyBtn = '';
+        if (t === 'image') {{
+          const src = (b.extras && b.extras.src) || '';
+          const isLocal = src && !/^(https?:|data:)/i.test(src);
+          if (isLocal) {{
+            altBtn = '<button type="button" class="btn-ai-mini ed-alt-ia" ' + dataAttrs + ' data-filename="' + escapeHtml(src) + '" title="Generar texto alternativo descriptivo con IA (WCAG 1.1.1)">🤖 Sugerir alt con IA</button>';
+            copyBtn = '<button type="button" class="btn-ai-mini ed-copyright-ia" ' + dataAttrs + ' data-filename="' + escapeHtml(src) + '" title="Evaluar riesgo de copyright con IA de visión">⚠️ Comprobar copyright</button>';
+          }}
+        }}
         return '<div class="ed-multimedia">' +
-          '<input type="text" ' + dataAttrs + ' data-field="text" placeholder="Pie/Título" value="' + escapeHtml(b.text || '') + '">' +
+          '<input type="text" ' + dataAttrs + ' data-field="text" placeholder="Pie/Título (alt-text para imágenes)" value="' + escapeHtml(b.text || '') + '">' +
           '<input type="text" ' + dataAttrs + ' data-extra="src" placeholder="' + placeholder + '" value="' + escapeHtml((b.extras && b.extras.src) || '') + '">' +
+          altBtn + copyBtn +
           '</div>';
       }}
       // Texto largo: textarea
@@ -2538,6 +3090,358 @@ def course_edit(token):
     .ed-add-group {{ display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-bottom: 0.3rem; padding-bottom: 0.3rem; border-bottom: 1px dashed var(--paper-deep); }}
     .ed-add-group:last-child {{ border-bottom: none; }}
     .ed-add-label {{ font-size: 0.72rem; color: var(--ink-mute); font-weight: 600; min-width: 75px; }}
+
+    /* =========================================================
+       FASE 3 (v0.5): UI para etiquetas y asistente IA avanzado
+       ========================================================= */
+    .ed-tags-block {{
+      margin: 1rem 0 0.6rem;
+      padding: 0.9rem 1rem;
+      background: var(--paper-warm, #FAF6EF);
+      border: 1px solid var(--paper-deep);
+      border-radius: 8px;
+    }}
+    .ed-tags-label {{
+      display: block;
+      font-weight: 600;
+      color: var(--primary-deep);
+      margin-bottom: 0.5rem;
+      font-size: 0.95rem;
+    }}
+    .ed-tags-hint {{
+      font-weight: 400;
+      color: var(--ink-mute);
+      font-size: 0.78rem;
+    }}
+    .ed-tags-list {{
+      list-style: none; padding: 0; margin: 0 0 0.6rem;
+      display: flex; flex-wrap: wrap; gap: 0.4rem;
+      min-height: 1.6rem;
+    }}
+    .ed-tag-chip {{
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.25rem 0.55rem 0.25rem 0.75rem;
+      background: var(--primary-mist, #DBEAFE);
+      color: var(--primary-deep);
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }}
+    .ed-tag-del {{
+      background: transparent; border: none; color: var(--primary-deep);
+      cursor: pointer; font-size: 1rem; line-height: 1;
+      padding: 0 0.1rem; opacity: 0.6;
+      transition: opacity 0.15s;
+    }}
+    .ed-tag-del:hover {{ opacity: 1; color: var(--alert, #DC2626); }}
+    .ed-tag-del:focus-visible {{ outline: 2px solid var(--primary); outline-offset: 1px; border-radius: 50%; }}
+    .ed-tags-actions {{
+      display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    }}
+    .ed-tag-input {{
+      flex: 1; min-width: 200px;
+      padding: 0.45rem 0.7rem; border: 1px solid var(--paper-deep);
+      border-radius: 6px; font-family: inherit; font-size: 0.88rem;
+    }}
+    .ed-tag-input:focus {{
+      outline: 2px solid var(--primary-bright);
+      outline-offset: 1px;
+      border-color: var(--primary);
+    }}
+
+    /* Panel "Asistente IA avanzado" colapsable */
+    .ed-ai-advanced {{
+      margin-top: 1rem;
+      background: linear-gradient(135deg, rgba(139,92,246,0.05), rgba(99,102,241,0.05));
+      border: 1px solid #c4b5fd;
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    .ed-ai-advanced > summary {{
+      padding: 0.8rem 1rem;
+      cursor: pointer;
+      font-weight: 600;
+      color: #5b21b6;
+      background: rgba(139,92,246,0.08);
+      list-style: none;
+      user-select: none;
+    }}
+    .ed-ai-advanced > summary::-webkit-details-marker {{ display: none; }}
+    .ed-ai-advanced > summary:hover {{ background: rgba(139,92,246,0.15); }}
+    .ed-ai-advanced > summary::before {{
+      content: '▸';
+      display: inline-block;
+      margin-right: 0.5rem;
+      transition: transform 0.15s;
+    }}
+    .ed-ai-advanced[open] > summary::before {{ transform: rotate(90deg); }}
+    .ed-ai-advanced-body {{
+      padding: 1rem;
+      display: flex; flex-direction: column; gap: 1rem;
+    }}
+
+    /* Configurador de quiz */
+    .ed-quiz-config {{
+      border: 1px solid var(--paper-deep);
+      border-radius: 6px;
+      padding: 1rem;
+      margin: 0;
+      background: white;
+    }}
+    .ed-quiz-config legend {{
+      padding: 0 0.5rem;
+      font-weight: 600;
+      color: var(--primary-deep);
+      font-size: 0.92rem;
+    }}
+    .ed-quiz-config-grid {{
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 0.7rem;
+      margin-bottom: 0.7rem;
+    }}
+    @media (max-width: 600px) {{
+      .ed-quiz-config-grid {{ grid-template-columns: 1fr; }}
+    }}
+    .ed-quiz-config-grid label {{
+      display: flex; flex-direction: column; gap: 0.25rem;
+      font-size: 0.85rem; color: var(--ink-soft); font-weight: 600;
+    }}
+    .ed-quiz-config-grid select,
+    .ed-quiz-config-grid input {{
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--paper-deep);
+      border-radius: 5px;
+      font-family: inherit;
+      font-size: 0.9rem;
+    }}
+    .ed-quiz-config-types {{
+      display: flex; gap: 0.7rem; flex-wrap: wrap;
+      margin-bottom: 0.7rem;
+      padding-top: 0.5rem;
+      border-top: 1px dashed var(--paper-deep);
+    }}
+    .ed-quiz-config-types label {{
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.88rem;
+      font-weight: 500;
+      cursor: pointer;
+    }}
+    .ed-qc-info {{
+      font-size: 0.8rem;
+      color: var(--ink-mute);
+      margin: 0.5rem 0;
+      padding: 0.5rem 0.6rem;
+      background: var(--paper-warm, #FAF6EF);
+      border-left: 3px solid var(--warn, #F59E0B);
+      border-radius: 0 4px 4px 0;
+    }}
+
+    /* =========================================================
+       FASE 4 (v0.5): modales para WCAG y vista previa
+       ========================================================= */
+    .ed-modal-overlay {{
+      position: fixed; inset: 0;
+      background: rgba(15, 23, 42, 0.6);
+      z-index: 10000;
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem;
+      animation: edModalFade 0.15s ease;
+    }}
+    @keyframes edModalFade {{
+      from {{ opacity: 0; }} to {{ opacity: 1; }}
+    }}
+    .ed-modal-card {{
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 12px 48px rgba(0,0,0,0.25);
+      max-width: 900px; width: 100%;
+      max-height: 90vh;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }}
+    .ed-modal-preview {{ max-width: 1200px; }}
+    .ed-modal-head {{
+      display: flex; align-items: center;
+      padding: 1rem 1.3rem;
+      border-bottom: 1px solid var(--paper-deep);
+      gap: 1rem;
+    }}
+    .ed-modal-head h3 {{
+      margin: 0;
+      font-size: 1.15rem;
+      color: var(--primary-deep);
+      flex: 1;
+    }}
+    .ed-modal-head select {{
+      padding: 0.4rem 0.7rem;
+      border: 1px solid var(--paper-deep);
+      border-radius: 5px;
+      font-family: inherit;
+      font-size: 0.88rem;
+      max-width: 360px;
+    }}
+    .ed-modal-close {{
+      background: transparent;
+      border: none;
+      font-size: 1.6rem;
+      line-height: 1;
+      cursor: pointer;
+      color: var(--ink-mute);
+      padding: 0 0.4rem;
+    }}
+    .ed-modal-close:hover {{ color: var(--alert, #DC2626); }}
+    .ed-modal-close:focus-visible {{
+      outline: 2px solid var(--primary);
+      border-radius: 4px;
+    }}
+    .ed-modal-body {{
+      overflow-y: auto;
+      padding: 1rem 1.3rem;
+      flex: 1;
+    }}
+    .ed-modal-body-iframe {{
+      padding: 0;
+      display: flex;
+    }}
+    .ed-modal-body-iframe iframe {{
+      flex: 1;
+      width: 100%;
+      min-height: 70vh;
+      border: 0;
+      background: white;
+    }}
+
+    /* Informe WCAG */
+    .ed-modal-ok {{
+      padding: 0.7rem 1rem;
+      background: rgba(16,185,129,0.12);
+      border-left: 4px solid #10B981;
+      color: #064E3B;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+    }}
+    .ed-modal-ko {{
+      padding: 0.7rem 1rem;
+      background: rgba(239,68,68,0.12);
+      border-left: 4px solid #EF4444;
+      color: #7F1D1D;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+    }}
+    .wcag-loc {{
+      margin-bottom: 1.2rem;
+      padding: 0.7rem 0.9rem;
+      background: var(--paper-warm, #FAF6EF);
+      border-radius: 6px;
+    }}
+    .wcag-loc h4 {{
+      margin: 0 0 0.5rem;
+      font-size: 0.92rem;
+      color: var(--primary-deep);
+    }}
+    .wcag-loc ul {{ list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }}
+    .wcag-loc li {{
+      padding: 0.5rem 0.7rem;
+      background: white;
+      border-radius: 4px;
+      border-left: 3px solid var(--paper-deep);
+      font-size: 0.88rem;
+    }}
+    .wcag-loc li.wcag-error {{ border-left-color: #EF4444; }}
+    .wcag-loc li.wcag-warning {{ border-left-color: #F59E0B; }}
+    .wcag-loc li.wcag-info {{ border-left-color: #3B82F6; }}
+    .wcag-desc {{
+      display: block;
+      color: var(--ink-mute);
+      font-size: 0.82rem;
+      margin-top: 0.3rem;
+    }}
+
+    /* =========================================================
+       FASE 5 (v0.5): modales de enrich, copyright, snapshots
+       ========================================================= */
+    .ed-modal-foot {{
+      display: flex;
+      gap: 0.6rem;
+      justify-content: flex-end;
+      padding: 0.8rem 1.3rem;
+      border-top: 1px solid var(--paper-deep);
+      background: var(--paper-warm, #FAF6EF);
+    }}
+    /* Lista de sugerencias enrich */
+    .enrich-list {{
+      list-style: none; padding: 0; margin: 1rem 0 0;
+      display: flex; flex-direction: column; gap: 0.8rem;
+    }}
+    .enrich-item {{
+      padding: 0.9rem 1.1rem;
+      background: white;
+      border: 1px solid var(--paper-deep);
+      border-radius: 6px;
+      display: grid;
+      grid-template-columns: auto auto 1fr;
+      grid-template-areas:
+        "check type reason"
+        "before before before"
+        "after after after";
+      gap: 0.4rem 0.7rem;
+      align-items: center;
+    }}
+    .enrich-check {{ grid-area: check; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.3rem; font-weight: 600; }}
+    .enrich-type {{
+      grid-area: type;
+      font-family: var(--mono, monospace);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      background: var(--primary-mist, #DBEAFE);
+      color: var(--primary-deep);
+      border-radius: 999px;
+    }}
+    .enrich-reason {{
+      grid-area: reason;
+      font-style: italic;
+      color: var(--ink-mute);
+      font-size: 0.85rem;
+    }}
+    .enrich-before, .enrich-after {{
+      font-size: 0.85rem;
+      padding: 0.45rem 0.6rem;
+      border-radius: 4px;
+    }}
+    .enrich-before {{ grid-area: before; background: #FEF2F2; }}
+    .enrich-after {{ grid-area: after; background: #ECFDF5; }}
+    .enrich-before strong, .enrich-after strong {{ color: var(--ink); }}
+
+    /* Modal copyright */
+    .copy-risk {{
+      padding: 0.7rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      font-size: 1rem;
+    }}
+    .copy-risk.risk-low {{ background: rgba(16,185,129,0.12); border-left: 4px solid #10B981; color: #064E3B; }}
+    .copy-risk.risk-medium {{ background: rgba(245,158,11,0.15); border-left: 4px solid #F59E0B; color: #78350F; }}
+    .copy-risk.risk-high {{ background: rgba(239,68,68,0.15); border-left: 4px solid #EF4444; color: #7F1D1D; }}
+    .copy-summary {{ font-size: 0.95rem; color: var(--ink); line-height: 1.5; }}
+    .copy-concerns {{ list-style: disc inside; margin: 0.4rem 0 1rem; padding: 0; font-size: 0.88rem; color: var(--ink-soft); }}
+    .copy-concerns li {{ margin: 0.2rem 0; }}
+    .copy-reco {{
+      padding: 0.7rem 0.9rem;
+      background: var(--paper-warm);
+      border-left: 3px solid var(--primary);
+      border-radius: 0 4px 4px 0;
+      font-size: 0.9rem;
+      color: var(--ink-soft);
+    }}
+
+    /* Selector de snapshot en preview */
+    #ed-preview-snap {{
+      max-width: 240px;
+      font-size: 0.85rem;
+    }}
     </style>
     """
     return render_page("Editar · " + row["title"], body, user=user, active="library")
@@ -2850,6 +3754,739 @@ Genera ahora las {n_questions} preguntas. Responde solo con el JSON."""
         return jsonify({"error": "La IA no devolvió preguntas válidas"}), 502
 
     return jsonify({"questions": valid})
+
+
+# ============================================================
+# ENDPOINTS FASE 2 (v0.5): tags IA, alt-text, quiz configurable,
+# IMS CP, banco Aiken extendido
+# ============================================================
+
+@app.route("/api/curso/<token>/ai-tags", methods=["POST"])
+@login_required
+def course_ai_tags(token):
+    """Genera 5-8 etiquetas temáticas para un tema usando la IA.
+
+    Body JSON: {"topic_index": 0, "n": 6}
+    Devuelve: {"tags": ["...", "..."]}
+    Las etiquetas se guardan automáticamente en la estructura del curso.
+    """
+    from scorm_builder.ai_assist import is_available, generate_tags
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        topic_index = int(payload.get("topic_index", 0))
+        n = max(4, min(8, int(payload.get("n", 6))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "topic_index/n inválidos"}), 400
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    topics = data.get("topics", [])
+    if topic_index < 0 or topic_index >= len(topics):
+        return jsonify({"error": f"topic_index fuera de rango (0..{len(topics)-1})"}), 400
+
+    tags = generate_tags(topics[topic_index], n=n)
+    if tags is None:
+        return jsonify({"error": "La IA no devolvió etiquetas válidas"}), 502
+
+    # Persistir
+    topics[topic_index]["tags"] = tags
+    with open(structure_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return jsonify({"tags": tags})
+
+
+@app.route("/api/curso/<token>/ai-alt-text", methods=["POST"])
+@login_required
+def course_ai_alt_text(token):
+    """Genera alt-text para una imagen subida. Body multipart con campo 'image'."""
+    from scorm_builder.ai_assist import is_available, generate_alt_text
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    if "image" not in request.files:
+        return jsonify({"error": "Falta el archivo 'image'"}), 400
+    f = request.files["image"]
+    if not f or not f.filename:
+        return jsonify({"error": "Archivo de imagen vacío"}), 400
+
+    # Guardar temporalmente
+    import tempfile
+    suffix = "." + (f.filename.rsplit(".", 1)[-1] or "png").lower()
+    tmp = Path(tempfile.mktemp(suffix=suffix))
+    f.save(str(tmp))
+    try:
+        alt = generate_alt_text(tmp)
+    finally:
+        try: tmp.unlink()
+        except Exception: pass
+
+    if not alt:
+        return jsonify({"error": "La IA no pudo generar alt-text"}), 502
+    return jsonify({"alt": alt})
+
+
+# ============================================================
+# ENDPOINTS FASE 4: WCAG check + Vista previa
+# ============================================================
+
+@app.route("/api/curso/<token>/wcag-check", methods=["POST"])
+@login_required
+def course_wcag_check(token):
+    """Ejecuta el validador WCAG 2.1 AA sobre la estructura actual.
+
+    Devuelve un informe con errores bloqueantes (que impedirían empaquetar
+    con strict_wcag=True), warnings (avisos no bloqueantes) y resumen.
+    """
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.wcag import validate_course
+
+    course = course_from_dict(data)
+    # Recursos del curso para que el validador pueda comprobar .vtt etc.
+    recursos_dir = Path(row["zip_path"]).parent / "recursos"
+    recursos_arg = recursos_dir if recursos_dir.exists() else None
+    report = validate_course(course, recursos_dir=recursos_arg)
+    return jsonify(report.to_dict())
+
+
+@app.route("/api/curso/<token>/preview-html", methods=["GET"])
+@login_required
+def course_preview_html(token):
+    """Renderiza el HTML de un tema sin empaquetar SCORM.
+
+    Query params:
+      - topic_index: índice del tema a previsualizar (default 0)
+
+    Devuelve el HTML directamente (text/html). Útil para mostrarlo en un
+    iframe dentro del editor sin descargar el SCORM.
+    """
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        abort(404)
+
+    try:
+        topic_index = int(request.args.get("topic_index", 0))
+    except ValueError:
+        topic_index = 0
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.renderer import render_html
+    from scorm_builder.themes import get_theme
+
+    course = course_from_dict(data)
+    theme = get_theme(course.metadata.palette)
+    if not course.topics or topic_index < 0 or topic_index >= len(course.topics):
+        return "<p>Tema fuera de rango.</p>", 404
+    topic = course.topics[topic_index]
+
+    # En vista previa NO incluimos el botón PDF (el PDF se genera al
+    # empaquetar). Pero sí los recursos: el HTML referencia recursos/
+    # con rutas relativas. Como servimos el HTML desde la app, podemos
+    # reescribir las rutas para que apunten a la carpeta de recursos del curso.
+    htmls = render_html(course, theme)
+    html_str = htmls.get(topic.number, "")
+    # Reescribir 'recursos/...' a la ruta servida por la app
+    serve_prefix = url_for("course_preview_resource", token=token, filename="").rstrip("/") + "/"
+    html_str = html_str.replace('src="recursos/', f'src="{serve_prefix}')
+    html_str = html_str.replace('href="recursos/', f'href="{serve_prefix}')
+
+    from flask import Response
+    return Response(html_str, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/curso/<token>/preview-resource/<path:filename>")
+@login_required
+def course_preview_resource(token, filename):
+    """Sirve un fichero de la carpeta `recursos/` del curso para la vista
+    previa (imágenes, PDFs, vídeos, etc.). Solo accesible por el dueño."""
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    resource = Path(row["zip_path"]).parent / "recursos" / filename
+    if not resource.exists() or not resource.is_file():
+        abort(404)
+    # Sanity check: el resultado debe estar dentro de recursos/
+    try:
+        resource.resolve().relative_to((Path(row["zip_path"]).parent / "recursos").resolve())
+    except ValueError:
+        abort(403)
+    return send_file(str(resource), as_attachment=False)
+
+
+@app.route("/api/curso/<token>/ai-alt-text-block", methods=["POST"])
+@login_required
+def course_ai_alt_text_block(token):
+    """Genera alt-text para una imagen ya incluida en el curso (en recursos/).
+
+    Body JSON: {"filename": "docx_img_001.png"}
+    Devuelve: {"alt": "..."}
+
+    Variante del endpoint ai-alt-text que en lugar de subir la imagen,
+    referencia una ya guardada como recurso del curso. Pensado para el
+    botón "Sugerir alt" del editor sobre bloques IMAGE existentes.
+    """
+    from scorm_builder.ai_assist import is_available, generate_alt_text
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    payload = request.get_json(silent=True) or {}
+    filename = (payload.get("filename") or "").strip()
+    if not filename or "/" in filename or ".." in filename:
+        return jsonify({"error": "filename inválido"}), 400
+
+    img_path = Path(row["zip_path"]).parent / "recursos" / filename
+    if not img_path.exists():
+        return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
+
+    alt = generate_alt_text(img_path)
+    if not alt:
+        return jsonify({"error": "La IA no pudo generar alt-text"}), 502
+    return jsonify({"alt": alt})
+
+
+# ============================================================
+# ENDPOINTS FASE 5: enriquecer Word, copyright, cmi5, snapshots, plantilla
+# ============================================================
+
+def _save_snapshot(job_dir: Path, label: str = "") -> Optional[str]:
+    """Guarda una copia versionada de structure.json. Devuelve el ID."""
+    import time
+    structure_path = job_dir / "structure.json"
+    if not structure_path.exists():
+        return None
+    snap_dir = job_dir / "snapshots"
+    snap_dir.mkdir(exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label)[:30]
+    snap_id = f"{ts}_{safe_label}" if safe_label else ts
+    target = snap_dir / f"{snap_id}.json"
+    shutil.copy2(structure_path, target)
+    # Limitar a últimas 10 snapshots
+    snaps = sorted(snap_dir.glob("*.json"))
+    while len(snaps) > 10:
+        snaps[0].unlink()
+        snaps = sorted(snap_dir.glob("*.json"))
+    return snap_id
+
+
+@app.route("/api/curso/<token>/snapshots", methods=["GET"])
+@login_required
+def course_snapshots_list(token):
+    """Lista las snapshots disponibles del curso."""
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    snap_dir = Path(row["zip_path"]).parent / "snapshots"
+    if not snap_dir.exists():
+        return jsonify({"snapshots": []})
+    out = []
+    for p in sorted(snap_dir.glob("*.json"), reverse=True):
+        out.append({
+            "id": p.stem,
+            "filename": p.name,
+            "size": p.stat().st_size,
+        })
+    return jsonify({"snapshots": out})
+
+
+@app.route("/api/curso/<token>/preview-html", methods=["GET"], defaults={"snapshot_id": None})
+@app.route("/api/curso/<token>/preview-html/<snapshot_id>", methods=["GET"])
+@login_required
+def course_preview_html_snapshot(token, snapshot_id):
+    """Variante de preview-html que puede renderizar una snapshot concreta.
+
+    Si snapshot_id es None, comportamiento idéntico al endpoint original
+    (renderiza la versión actual). Si se pasa, busca en snapshots/<id>.json.
+    """
+    # Si no hay snapshot, delegamos en la ruta original
+    if not snapshot_id:
+        return course_preview_html(token)
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    # Path traversal defense
+    if "/" in snapshot_id or ".." in snapshot_id:
+        abort(400)
+    snap_path = Path(row["zip_path"]).parent / "snapshots" / f"{snapshot_id}.json"
+    if not snap_path.exists():
+        abort(404)
+    try:
+        topic_index = int(request.args.get("topic_index", 0))
+    except ValueError:
+        topic_index = 0
+    with open(snap_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.renderer import render_html
+    from scorm_builder.themes import get_theme
+
+    course = course_from_dict(data)
+    theme = get_theme(course.metadata.palette)
+    if not course.topics or topic_index < 0 or topic_index >= len(course.topics):
+        return "<p>Tema fuera de rango.</p>", 404
+    topic = course.topics[topic_index]
+    htmls = render_html(course, theme)
+    html_str = htmls.get(topic.number, "")
+    serve_prefix = url_for("course_preview_resource", token=token, filename="").rstrip("/") + "/"
+    html_str = html_str.replace('src="recursos/', f'src="{serve_prefix}')
+    html_str = html_str.replace('href="recursos/', f'href="{serve_prefix}')
+
+    # Banner indicando que es vista de snapshot
+    banner = (
+        f'<div style="position:fixed;top:0;left:0;right:0;background:#F59E0B;'
+        f'color:#78350F;padding:0.5rem 1rem;text-align:center;z-index:99999;'
+        f'font-family:system-ui,sans-serif;font-weight:600;font-size:0.9rem;">'
+        f'📸 Vista de snapshot: <code>{html_escape(snapshot_id)}</code></div>'
+    )
+    html_str = html_str.replace("<body>", "<body>" + banner, 1)
+
+    from flask import Response
+    return Response(html_str, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/api/curso/<token>/ai-enrich", methods=["POST"])
+@login_required
+def course_ai_enrich(token):
+    """Sugiere convertir párrafos en callouts según su semántica.
+
+    Body JSON: {"topic_index": 0}
+    Devuelve: {"suggestions": [...], "truncated": bool}
+
+    No modifica la estructura. El frontend muestra las sugerencias y, al
+    aceptar, llama a /apply-enrich con los índices aceptados.
+    """
+    from scorm_builder.ai_assist import is_available, enrich_topic_with_callouts
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        topic_index = int(payload.get("topic_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "topic_index inválido"}), 400
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    topics = data.get("topics", [])
+    if topic_index < 0 or topic_index >= len(topics):
+        return jsonify({"error": "topic_index fuera de rango"}), 400
+    result = enrich_topic_with_callouts(topics[topic_index])
+    if result is None:
+        return jsonify({"error": "La IA no pudo procesar el tema"}), 502
+    return jsonify(result)
+
+
+@app.route("/api/curso/<token>/apply-enrich", methods=["POST"])
+@login_required
+def course_apply_enrich(token):
+    """Aplica las sugerencias aceptadas de enrich. Crea snapshot previo.
+
+    Body JSON:
+      {
+        "topic_index": 0,
+        "accepted": [
+          {"subsection_id": "l1", "block_index": 2,
+           "suggested_type": "callout_key", "suggested_text": "..."}
+        ]
+      }
+    """
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    job_dir = Path(row["zip_path"]).parent
+    structure_path = job_dir / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        topic_index = int(payload.get("topic_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "topic_index inválido"}), 400
+    accepted = payload.get("accepted", [])
+    if not isinstance(accepted, list) or not accepted:
+        return jsonify({"error": "Lista 'accepted' vacía"}), 400
+
+    # Snapshot ANTES de aplicar
+    snap_id = _save_snapshot(job_dir, label="pre_enrich")
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    topics = data.get("topics", [])
+    if topic_index < 0 or topic_index >= len(topics):
+        return jsonify({"error": "topic_index fuera de rango"}), 400
+    topic = topics[topic_index]
+    sub_by_id = {s.get("id"): s for s in topic.get("subsections", [])}
+    valid_types = {"callout_key", "callout_alert", "callout_warn",
+                   "callout_success", "quote"}
+
+    applied = 0
+    for change in accepted:
+        if not isinstance(change, dict):
+            continue
+        sub_id = change.get("subsection_id")
+        try:
+            bi = int(change.get("block_index", -1))
+        except (TypeError, ValueError):
+            continue
+        new_type = change.get("suggested_type", "")
+        new_text = (change.get("suggested_text") or "").strip()
+        sub = sub_by_id.get(sub_id)
+        if not sub or new_type not in valid_types or not new_text:
+            continue
+        blocks = sub.get("blocks", [])
+        if bi < 0 or bi >= len(blocks):
+            continue
+        block = blocks[bi]
+        # Solo cambiamos si sigue siendo un paragraph (defensivo: la
+        # estructura puede haber cambiado desde que se generaron las sugerencias)
+        if block.get("type") != "paragraph":
+            continue
+        block["type"] = new_type
+        block["text"] = new_text
+        # Limpiar text_html porque el texto ha cambiado
+        block["text_html"] = None
+        applied += 1
+
+    with open(structure_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return jsonify({"applied": applied, "snapshot_id": snap_id})
+
+
+@app.route("/api/curso/<token>/ai-copyright", methods=["POST"])
+@login_required
+def course_ai_copyright(token):
+    """Analiza el riesgo de copyright de una imagen ya guardada.
+
+    Body JSON: {"filename": "docx_img_001.png"}
+    """
+    from scorm_builder.ai_assist import is_available, detect_copyright_risk
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    filename = (payload.get("filename") or "").strip()
+    if not filename or "/" in filename or ".." in filename:
+        return jsonify({"error": "filename inválido"}), 400
+    img_path = Path(row["zip_path"]).parent / "recursos" / filename
+    if not img_path.exists():
+        return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
+    result = detect_copyright_risk(img_path)
+    if not result:
+        return jsonify({"error": "La IA no pudo analizar la imagen"}), 502
+    return jsonify(result)
+
+
+@app.route("/api/curso/<token>/export-cmi5", methods=["POST"])
+@login_required
+def course_export_cmi5(token):
+    """Genera un paquete cmi5 (xAPI) del curso completo."""
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.renderer import render_html
+    from scorm_builder.themes import get_theme
+    from scorm_builder.exporters import export_cmi5
+    course = course_from_dict(data)
+    theme = get_theme(course.metadata.palette)
+    htmls = render_html(course, theme)
+    course_dir = Path(row["zip_path"]).parent
+    recursos_dir = course_dir / "recursos"
+    recursos_arg = recursos_dir if recursos_dir.exists() else None
+    out_zip = course_dir / "curso_cmi5.zip"
+    export_cmi5(course, htmls, out_zip, recursos_dir=recursos_arg)
+    return jsonify({"ok": True, "filename": out_zip.name})
+
+
+# Ruta global para descargar la plantilla Word moderna
+@app.route("/plantilla/descargar")
+def plantilla_descargar():
+    """Genera al vuelo y devuelve la plantilla Word moderna."""
+    import tempfile
+    from scorm_builder.template_builder import build_modern_template
+    tmp = Path(tempfile.mktemp(suffix=".docx"))
+    try:
+        build_modern_template(tmp, course_title="Mi curso", author="Tu nombre")
+        return send_file(
+            str(tmp),
+            as_attachment=True,
+            download_name="Plantilla_Curso_SCORM_v5.docx",
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    finally:
+        # Lo limpia el OS; con send_file con as_attachment Flask cierra el handle
+        pass
+
+
+
+@app.route("/api/curso/<token>/ai-quiz-config", methods=["POST"])
+@login_required
+def course_ai_quiz_config(token):
+    """Genera quizzes según una configuración detallada por tema.
+
+    Body JSON:
+      {
+        "topic_index": 0,
+        "location": "final" | "per_subsection" | "mixed",
+        "types": ["multiple_choice", "true_false", "fill_in"],
+        "n_questions": 5
+      }
+    Devuelve: {"final": [...], "by_subsection": {sub_id: [...]}}
+    Se guardan en la estructura del curso (sobreescribiendo quiz e inline_quiz).
+    """
+    from scorm_builder.ai_assist import is_available, generate_quiz, QuizConfig
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        topic_index = int(payload.get("topic_index", 0))
+        n_questions = max(1, min(15, int(payload.get("n_questions", 5))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Parámetros inválidos"}), 400
+
+    location = payload.get("location", "final")
+    if location not in {"final", "per_subsection", "mixed"}:
+        location = "final"
+    types = payload.get("types") or ["multiple_choice"]
+    types = [t for t in types if t in {"multiple_choice", "true_false", "fill_in"}]
+    if not types:
+        types = ["multiple_choice"]
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+    topics = data.get("topics", [])
+    if topic_index < 0 or topic_index >= len(topics):
+        return jsonify({"error": f"topic_index fuera de rango (0..{len(topics)-1})"}), 400
+
+    cfg = QuizConfig(location=location, types=types, n_questions=n_questions)
+    result = generate_quiz(topics[topic_index], config=cfg)
+    if result is None:
+        return jsonify({"error": "La IA no devolvió preguntas válidas"}), 502
+
+    # Persistir: el quiz final reemplaza el existente; inline_quiz se reemplaza
+    topics[topic_index]["quiz"] = [
+        {**q} for q in result["final"]
+    ]
+    topics[topic_index]["inline_quiz"] = {
+        sub_id: [{**q} for q in qs]
+        for sub_id, qs in result["by_subsection"].items()
+    }
+    with open(structure_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return jsonify({
+        "final_count": len(result["final"]),
+        "by_subsection_count": {k: len(v) for k, v in result["by_subsection"].items()},
+        "result": result,
+    })
+
+
+
+@app.route("/api/curso/<token>/export-imscp", methods=["POST"])
+@login_required
+def course_export_imscp(token):
+    """Genera y guarda un paquete IMS Content Package del curso completo."""
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.renderer import render_html
+    from scorm_builder.themes import get_theme
+    from scorm_builder.exporters import export_ims_cp
+
+    course = course_from_dict(data)
+    theme = get_theme(course.metadata.palette)
+    htmls = render_html(course, theme)
+
+    # Buscar recursos asociados al curso (PDFs, imágenes, etc.)
+    course_dir = Path(row["zip_path"]).parent
+    recursos_dir = course_dir / "recursos"
+    recursos_arg = recursos_dir if recursos_dir.exists() else None
+
+    out_zip = course_dir / "curso_imscp.zip"
+    export_ims_cp(course, htmls, out_zip, recursos_dir=recursos_arg)
+
+    return jsonify({"ok": True, "filename": out_zip.name})
+
+
+@app.route("/api/curso/<token>/ai-aiken-extendido", methods=["POST"])
+@login_required
+def course_ai_aiken_extendido(token):
+    """Genera un banco Aiken extendido (30-50 preguntas por tema) con IA."""
+    from scorm_builder.ai_assist import is_available
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+
+    structure_path = Path(row["zip_path"]).parent / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        n = max(10, min(60, int(payload.get("n", 30))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Parámetro n inválido"}), 400
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    from scorm_builder.api import course_from_dict
+    from scorm_builder.aiken_builder import build_extended_aiken
+
+    course = course_from_dict(data)
+    course_dir = Path(row["zip_path"]).parent
+    aiken_dir = course_dir / "aiken_extendido"
+    files = build_extended_aiken(course, aiken_dir, n_questions_per_topic=n)
+    if not files:
+        return jsonify({"error": "No se pudo generar el banco extendido"}), 502
+    return jsonify({"ok": True, "files": [f.name for f in files]})
 
 
 # ============================================================
@@ -3467,6 +5104,24 @@ def course_export_download(token, kind):
         path = job_dir / f"curso_{token}_html_standalone.zip"
     elif kind == "scorm2004":
         path = job_dir / f"curso_{token}_scorm2004.zip"
+    elif kind == "imscp":
+        # v0.5 Fase 3: IMS Content Package generado por export-imscp
+        path = job_dir / "curso_imscp.zip"
+    elif kind == "cmi5":
+        # v0.5 Fase 5: paquete cmi5 / xAPI generado por export-cmi5
+        path = job_dir / "curso_cmi5.zip"
+    elif kind == "aiken-ext":
+        # v0.5 Fase 3: ZIP con todos los bancos Aiken extendidos
+        path = job_dir / "aiken_extendido.zip"
+        if not path.exists():
+            # Si no existe el ZIP pero sí la carpeta, lo creamos al vuelo
+            ext_dir = job_dir / "aiken_extendido"
+            if ext_dir.exists() and any(ext_dir.iterdir()):
+                import zipfile
+                with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in ext_dir.iterdir():
+                        if f.is_file():
+                            zf.write(f, arcname=f.name)
     else:
         abort(404)
     if not path.exists():
@@ -3625,7 +5280,7 @@ def _gen_readme(course_data: dict, num_hours: float, target: Path) -> Path:
         for s in t.get("subsections", []):
             lines.append(f"      {s.get('number', '')}  {s.get('title', '')}")
     lines.append("")
-    lines.append("Generado con SCORM Builder v0.4.3")
+    lines.append("Generado con SCORM Builder v0.5")
     target.write_text("\n".join(lines), encoding="utf-8")
     return target
 
@@ -4205,7 +5860,7 @@ def open_browser():
 def main():
     print()
     print("=" * 60)
-    print("  SCORM Builder · App web v0.4.3")
+    print("  SCORM Builder · App web v0.5")
     print("=" * 60)
     print()
     print(f"  Carpeta de trabajo: {APP_DIR}")

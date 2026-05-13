@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import html
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pathlib import Path
 
 from scorm_builder.parser import (
@@ -601,6 +601,222 @@ a:hover { color: var(--primary-deep); }
   #progress-tracker .pt-label { font-size: 0.7rem; }
   #progress-tracker .pt-info { font-size: 0.68rem; }
 }
+
+/* =============================================================
+   ACCESIBILIDAD WCAG 2.1 AA (v0.5)
+   ============================================================= */
+
+/* Salto al contenido — invisible hasta tabular */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 0;
+  background: var(--primary-deep);
+  color: white;
+  padding: 0.8rem 1.2rem;
+  text-decoration: none;
+  font-weight: 700;
+  z-index: 10000;
+  border-radius: 0 0 6px 0;
+  transition: top 0.15s ease-in-out;
+}
+.skip-link:focus {
+  top: 0;
+  outline: 3px solid var(--primary-bright);
+  outline-offset: 2px;
+}
+
+/* Foco visible reforzado para todos los elementos interactivos */
+:focus-visible {
+  outline: 3px solid var(--primary-bright);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+button:focus-visible,
+.btn:focus-visible,
+.nav-btn:focus-visible {
+  outline: 3px solid var(--primary-deep);
+  outline-offset: 3px;
+}
+
+/* Solo lectores de pantalla */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* main programáticamente enfocable sin contorno raro al hacer clic */
+main:focus { outline: none; }
+
+/* Botón de descarga del PDF en la cabecera */
+.pdf-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+  padding: 0.7rem 1.2rem;
+  background: rgba(255,255,255,0.12);
+  border: 2px solid rgba(255,255,255,0.5);
+  border-radius: 8px;
+  color: white;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.pdf-download-btn:hover {
+  background: rgba(255,255,255,0.22);
+  border-color: white;
+}
+.pdf-download-btn:active { transform: translateY(1px); }
+.pdf-download-btn:focus-visible {
+  outline: 3px solid white;
+  outline-offset: 3px;
+}
+.pdf-download-btn .pdf-icon { font-size: 1.2rem; }
+
+/* Enlaces dentro del cuerpo (los preservados desde el Word) */
+.module-main a,
+.module-main p a {
+  color: var(--primary-deep);
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+.module-main a:hover {
+  color: var(--primary-bright);
+}
+.module-main a:focus-visible {
+  background: var(--primary-pale, #DBEAFE);
+  text-decoration-thickness: 2px;
+}
+
+/* Feedback de quiz: aria-live region anunciado por lectores de pantalla */
+[aria-live] { /* asegurar que tenga al menos contenedor accesible */ }
+
+/* Animaciones reducidas para usuarios con prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Modo alto contraste forzado de Windows: asegurar bordes */
+@media (forced-colors: active) {
+  .callout, .concept-box, .pdf-download-btn, .btn, .nav-btn {
+    border: 1px solid CanvasText;
+  }
+}
+
+/* =============================================================
+   CHIPS DE TAGS / ETIQUETAS (v0.5 Fase 2)
+   ============================================================= */
+.tag-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1.2rem 0 0;
+  padding: 0;
+}
+.tag-chip {
+  display: inline-block;
+  padding: 0.3rem 0.8rem;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.45);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: white;
+}
+
+/* =============================================================
+   QUIZZES INTERCALADOS POR SUBAPARTADO (v0.5 Fase 2)
+   ============================================================= */
+.inline-quiz {
+  margin: 2rem 0;
+  padding: 1.5rem;
+  background: var(--paper-deep, #F1F5F9);
+  border-left: 4px solid var(--primary-bright);
+  border-radius: 6px;
+}
+.inline-quiz .inline-quiz-tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--primary-deep);
+  margin-bottom: 0.6rem;
+  font-weight: 700;
+}
+.inline-quiz .quiz-options { margin-top: 0.8rem; }
+.inline-quiz .quiz-feedback {
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+  border-radius: 6px;
+  display: none;
+}
+.inline-quiz .quiz-feedback.correct {
+  display: block;
+  background: rgba(16, 185, 129, 0.12);
+  border-left: 4px solid #10B981;
+  color: #064E3B;
+}
+.inline-quiz .quiz-feedback.wrong {
+  display: block;
+  background: rgba(239, 68, 68, 0.12);
+  border-left: 4px solid #EF4444;
+  color: #7F1D1D;
+}
+
+/* Estilos específicos por tipo de pregunta */
+fieldset.quiz[data-qtype="true_false"] .quiz-options,
+.inline-quiz[data-qtype="true_false"] .quiz-options {
+  display: flex;
+  gap: 1rem;
+}
+fieldset.quiz[data-qtype="true_false"] .quiz-option,
+.inline-quiz[data-qtype="true_false"] .quiz-option {
+  flex: 1;
+  text-align: center;
+  font-weight: 600;
+}
+
+/* Hueco visible en preguntas fill_in */
+.quiz-question .fill-blank {
+  display: inline-block;
+  min-width: 80px;
+  border-bottom: 2px solid var(--primary-deep);
+  margin: 0 0.3rem;
+}
+
+.btn-inline-check {
+  margin-top: 0.8rem;
+  padding: 0.5rem 1rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-inline-check:hover:not(:disabled) { background: var(--primary-deep); }
+.btn-inline-check:disabled {
+  background: #94A3B8;
+  cursor: not-allowed;
+}
 """
 
 
@@ -1026,6 +1242,41 @@ function finalizarTema() {
     alert('Tema completado. Tu progreso ha sido guardado.\\n\\nPuedes cerrar esta ventana cuando quieras.');
   }
 }
+
+// Evaluación de preguntas de repaso intercaladas (v0.5 Fase 2).
+// No afectan a la nota final, solo dan feedback inmediato al alumno.
+function evaluarInline(btn) {
+  var quiz = btn.closest('.inline-quiz');
+  if (!quiz) return;
+  var idx = quiz.getAttribute('data-q');
+  var correcto = parseInt(quiz.getAttribute('data-a'));
+  var seleccionado = quiz.querySelector('input[type="radio"]:checked');
+  var fb = quiz.querySelector('.quiz-feedback');
+  if (!seleccionado) {
+    if (fb) {
+      fb.className = 'quiz-feedback wrong';
+      fb.textContent = '⚠ Selecciona una opción antes de comprobar.';
+    }
+    return;
+  }
+  var valor = parseInt(seleccionado.value);
+  var opciones = quiz.querySelectorAll('.quiz-option');
+  opciones.forEach(function(opt, i) {
+    opt.classList.remove('correct','wrong');
+    if (i === correcto) opt.classList.add('correct');
+    if (i === valor && i !== correcto) opt.classList.add('wrong');
+  });
+  var ok = (valor === correcto);
+  var explanation = fb.getAttribute('data-explanation') || '';
+  if (fb) {
+    fb.className = 'quiz-feedback ' + (ok ? 'correct' : 'wrong');
+    var prefix = ok ? '✓ ¡Correcto! ' : '✗ Respuesta incorrecta. ';
+    fb.textContent = prefix + explanation;
+  }
+  // Deshabilitar el botón tras la primera comprobación
+  btn.disabled = true;
+  btn.textContent = 'Comprobado';
+}
 """
 
 
@@ -1325,6 +1576,24 @@ def _h(text: str) -> str:
     return html.escape(text or "", quote=True)
 
 
+def _h_or_html(block: Block) -> str:
+    """Devuelve `block.text_html` si está definido (HTML inline preservado),
+    o el texto escapado si no. Centraliza la decisión en el renderer."""
+    if block.text_html is not None:
+        return block.text_html
+    return _h(block.text)
+
+
+def _items_or_html(block: Block) -> List[str]:
+    """Devuelve los items renderizados como HTML, preservando inline si está disponible."""
+    if block.items_html is not None and len(block.items_html) == len(block.items):
+        return [
+            h if h is not None else _h(t)
+            for h, t in zip(block.items_html, block.items)
+        ]
+    return [_h(it) for it in block.items]
+
+
 def _render_block(block: Block) -> str:
     """Renderiza un bloque individual."""
     bt = block.type
@@ -1332,57 +1601,64 @@ def _render_block(block: Block) -> str:
         bt = BlockType(bt)
 
     if bt == BlockType.PARAGRAPH:
-        return f"<p>{_h(block.text)}</p>"
+        return f"<p>{_h_or_html(block)}</p>"
 
     if bt == BlockType.HEADING_3:
-        return f"<h3>{_h(block.text)}</h3>"
+        return f"<h3>{_h_or_html(block)}</h3>"
 
     if bt == BlockType.HEADING_4:
-        return f"<h4>{_h(block.text)}</h4>"
+        return f"<h4>{_h_or_html(block)}</h4>"
 
     if bt == BlockType.LIST_BULLET:
-        items_html = "\n".join(f"  <li>{_h(it)}</li>" for it in block.items)
+        items_html = "\n".join(f"  <li>{it}</li>" for it in _items_or_html(block))
         return f"<ul>\n{items_html}\n</ul>"
 
     if bt == BlockType.LIST_NUMBER:
-        items_html = "\n".join(f"  <li>{_h(it)}</li>" for it in block.items)
+        items_html = "\n".join(f"  <li>{it}</li>" for it in _items_or_html(block))
         return f"<ol>\n{items_html}\n</ol>"
 
     if bt == BlockType.TABLE:
         if not block.rows:
             return ""
-        header = block.rows[0]
-        body = block.rows[1:]
-        thead = "<thead><tr>" + "".join(f"<th>{_h(c)}</th>" for c in header) + "</tr></thead>"
+        # v0.5: si hay rows_html (celdas con enlaces/negritas), las usamos.
+        if block.rows_html and len(block.rows_html) == len(block.rows):
+            rows_data = block.rows_html
+            cell_render = lambda c: c  # ya viene como HTML
+        else:
+            rows_data = block.rows
+            cell_render = _h
+        header = rows_data[0]
+        body = rows_data[1:]
+        thead = "<thead><tr>" + "".join(f"<th scope=\"col\">{cell_render(c)}</th>" for c in header) + "</tr></thead>"
         tbody = "<tbody>" + "".join(
-            "<tr>" + "".join(f"<td>{_h(c)}</td>" for c in row) + "</tr>"
+            "<tr>" + "".join(f"<td>{cell_render(c)}</td>" for c in row) + "</tr>"
             for row in body
         ) + "</tbody>"
         return f'<table class="edit-table">{thead}{tbody}</table>'
 
     if bt == BlockType.CALLOUT_KEY:
-        return f'''<div class="callout callout-key">
-  <div class="callout-icon">i</div>
-  <div><p>{_h(block.text)}</p></div>
-</div>'''
+        return f'''<aside class="callout callout-key" role="note" aria-label="Concepto clave">
+  <div class="callout-icon" aria-hidden="true">i</div>
+  <div><p>{_h_or_html(block)}</p></div>
+</aside>'''
 
     if bt == BlockType.CALLOUT_ALERT:
-        return f'''<div class="callout callout-alert">
-  <div class="callout-icon">!</div>
-  <div><p>{_h(block.text)}</p></div>
-</div>'''
+        return f'''<aside class="callout callout-alert" role="note" aria-label="Aviso importante">
+  <div class="callout-icon" aria-hidden="true">!</div>
+  <div><p>{_h_or_html(block)}</p></div>
+</aside>'''
 
     if bt == BlockType.CALLOUT_SUCCESS:
-        return f'''<div class="callout callout-success">
-  <div class="callout-icon">✓</div>
-  <div><p>{_h(block.text)}</p></div>
-</div>'''
+        return f'''<aside class="callout callout-success" role="note" aria-label="Buena práctica">
+  <div class="callout-icon" aria-hidden="true">✓</div>
+  <div><p>{_h_or_html(block)}</p></div>
+</aside>'''
 
     if bt == BlockType.CALLOUT_WARN:
-        return f'''<div class="callout callout-warn">
-  <div class="callout-icon">⚠</div>
-  <div><p>{_h(block.text)}</p></div>
-</div>'''
+        return f'''<aside class="callout callout-warn" role="note" aria-label="Precaución">
+  <div class="callout-icon" aria-hidden="true">⚠</div>
+  <div><p>{_h_or_html(block)}</p></div>
+</aside>'''
 
     if bt == BlockType.QUOTE:
         # Si el texto empieza con "FUENTE:", separamos
@@ -1392,11 +1668,11 @@ def _render_block(block: Block) -> str:
             parts = text.split("\n", 1)
             source = parts[0].replace("FUENTE:", "", 1).strip().replace("FUENTE:", "")
             text = parts[1] if len(parts) > 1 else ""
-        source_html = f'<span class="concept-tag">{_h(source)}</span>' if source else ""
-        return f'''<div class="concept-box">
+        source_html = f'<cite class="concept-tag">{_h(source)}</cite>' if source else ""
+        return f'''<blockquote class="concept-box">
   {source_html}
   <p class="quote">{_h(text)}</p>
-</div>'''
+</blockquote>'''
 
     if bt == BlockType.DOWNLOAD:
         filename = block.extras.get("file", "") or block.extras.get("src", "")
@@ -1407,16 +1683,21 @@ def _render_block(block: Block) -> str:
   <span class="meta">{_h(filename)}</span>
 </a>'''
 
-    # ---- BLOQUES MULTIMEDIA (v0.2) ----
+    # ---- BLOQUES MULTIMEDIA (v0.2 / v0.5) ----
     if bt == BlockType.IMAGE:
         src = block.extras.get("src", "") or block.extras.get("file", "")
         if not src:
             return ""
         # Si es URL absoluta, dejar tal cual; si no, prefijar carpeta recursos
         url = src if src.startswith(("http://", "https://", "data:")) else f"recursos/{src}"
+        # Alt text WCAG 1.1.1: usamos block.text si lo hay, si no un genérico
+        # (la validación previa habrá avisado de que falta).
+        alt = (block.text or "").strip()
+        if not alt:
+            alt = "Imagen sin descripción"
         caption = f'<figcaption>{_h(block.text)}</figcaption>' if block.text else ""
         return f'''<figure class="media media-image">
-  <img src="{_h(url)}" alt="{_h(block.text)}" loading="lazy">
+  <img src="{_h(url)}" alt="{_h(alt)}" loading="lazy">
   {caption}
 </figure>'''
 
@@ -1428,10 +1709,11 @@ def _render_block(block: Block) -> str:
         # YouTube / Vimeo → iframe
         if is_url and ("youtube.com" in src or "youtu.be" in src or "vimeo.com" in src):
             embed_url = _to_embed_url(src)
+            iframe_title = (block.text or "Vídeo del tema").strip()
             caption = f'<figcaption>{_h(block.text)}</figcaption>' if block.text else ""
             return f'''<figure class="media media-video media-embed">
   <div class="video-wrapper">
-    <iframe src="{_h(embed_url)}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+    <iframe src="{_h(embed_url)}" title="{_h(iframe_title)}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
   </div>
   {caption}
 </figure>'''
@@ -1474,10 +1756,11 @@ def _render_block(block: Block) -> str:
         if not src:
             return ""
         embed_url = _to_embed_url(src)
+        iframe_title = (block.text or "Contenido incrustado").strip()
         caption = f'<figcaption>{_h(block.text)}</figcaption>' if block.text else ""
         return f'''<figure class="media media-embed">
   <div class="video-wrapper">
-    <iframe src="{_h(embed_url)}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+    <iframe src="{_h(embed_url)}" title="{_h(iframe_title)}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
   </div>
   {caption}
 </figure>'''
@@ -1525,51 +1808,121 @@ def _to_embed_url(url: str) -> str:
     return url
 
 
-def _render_subsection(sub: Subsection) -> str:
-    """Renderiza un subapartado completo."""
+def _render_subsection(sub: Subsection, inline_questions: Optional[List[Question]] = None) -> str:
+    """Renderiza un subapartado completo, con quiz inline opcional al final."""
     blocks_html = "\n".join(_render_block(b) for b in sub.blocks)
+    inline_html = _render_inline_quiz(inline_questions, sub.id) if inline_questions else ""
     return f'''<h2 id="{sub.id}">{_h(sub.number)} {_h(sub.title)}</h2>
 {blocks_html}
+{inline_html}
 '''
 
 
+def _render_question_options(q: Question, name_prefix: str, q_idx: int) -> str:
+    """Renderiza las opciones de una pregunta según su qtype."""
+    opts_html_parts: List[str] = []
+    qtype = getattr(q, "qtype", "multiple_choice")
+    # Para fill_in renderizamos el enunciado con el hueco (lo hace _render_question_stem),
+    # las opciones se muestran abajo como en multiple_choice.
+    for opt_idx, opt in enumerate(q.options):
+        input_id = f"{name_prefix}{q_idx}_opt{opt_idx}"
+        if qtype == "true_false":
+            label = _h(opt)  # "Verdadero" / "Falso"
+        else:
+            letter = chr(ord("A") + opt_idx)
+            label = f"{letter}. {_h(opt)}"
+        opts_html_parts.append(
+            f'<label class="quiz-option" for="{input_id}"><input id="{input_id}" '
+            f'type="radio" name="{name_prefix}{q_idx}" value="{opt_idx}"> {label}</label>'
+        )
+    return "\n".join(opts_html_parts)
+
+
+def _render_question_stem(q: Question) -> str:
+    """Renderiza el enunciado de una pregunta. Para fill_in marca el hueco."""
+    qtype = getattr(q, "qtype", "multiple_choice")
+    if qtype == "fill_in" and "___" in q.text:
+        parts = q.text.split("___", 1)
+        return f'{_h(parts[0])}<span class="fill-blank" aria-label="hueco a completar"></span>{_h(parts[1]) if len(parts) > 1 else ""}'
+    return _h(q.text)
+
+
 def _render_quiz(topic: Topic, mastery: int) -> str:
-    """Renderiza el quiz de un tema con cálculo de score y reporte SCORM."""
+    """Renderiza el quiz final de un tema con cálculo de score y reporte SCORM."""
     if not topic.quiz:
         return ""
 
     questions_html = []
     for idx, q in enumerate(topic.quiz):
-        opts_html = ""
-        for opt_idx, opt in enumerate(q.options):
-            letter = chr(ord("A") + opt_idx)
-            opts_html += f'''<label class="quiz-option"><input type="radio" name="qf{idx}" value="{opt_idx}"> {letter}. {_h(opt)}</label>
-'''
-        questions_html.append(f'''<div class="quiz" data-q="{idx}" data-a="{q.correct_index}">
-  <span class="quiz-tag">PREGUNTA {idx+1} / {len(topic.quiz)}</span>
-  <p class="quiz-question">{_h(q.text)}</p>
-  <div class="quiz-options">
+        qtype = getattr(q, "qtype", "multiple_choice")
+        opts_html = _render_question_options(q, "qf", idx)
+        stem_html = _render_question_stem(q)
+        questions_html.append(f'''<fieldset class="quiz" data-q="{idx}" data-a="{q.correct_index}" data-qtype="{qtype}">
+  <legend class="sr-only">Pregunta {idx+1} de {len(topic.quiz)}</legend>
+  <span class="quiz-tag" aria-hidden="true">PREGUNTA {idx+1} / {len(topic.quiz)}</span>
+  <p class="quiz-question">{stem_html}</p>
+  <div class="quiz-options" role="radiogroup" aria-label="Opciones de respuesta">
     {opts_html}
   </div>
-</div>''')
+</fieldset>''')
 
     questions_block = "\n".join(questions_html)
 
     return f'''<h2 id="evaluacion">Evaluación final</h2>
 <p>Responde a las {len(topic.quiz)} preguntas siguientes. Necesitas un <strong>{mastery}%</strong> de aciertos para superar el tema. Puedes repetir el test las veces que necesites.</p>
 
-<div id="quiz-final">
+<form id="quiz-final" onsubmit="event.preventDefault(); evaluarFinal();">
 {questions_block}
-</div>
 
-<button class="btn" onclick="evaluarFinal()" style="font-size:1.05rem; padding:1rem 2rem;">Comprobar mis respuestas</button>
+<button type="submit" class="btn" style="font-size:1.05rem; padding:1rem 2rem;">Comprobar mis respuestas</button>
+</form>
 
-<div id="resultado-final" style="display:none; margin-top:2rem;"></div>
+<div id="resultado-final" role="status" aria-live="polite" aria-atomic="true" style="display:none; margin-top:2rem;"></div>
 '''
 
 
-def render_topic(topic: Topic, course: CourseStructure, theme: Theme) -> str:
-    """Renderiza un tema completo como HTML standalone."""
+def _render_inline_quiz(questions: List[Question], sub_id: str) -> str:
+    """Renderiza preguntas intercaladas tras un subapartado (no evaluables,
+    son de repaso). Se evalúan en el cliente con feedback inmediato."""
+    if not questions:
+        return ""
+    parts: List[str] = ['<div class="inline-quiz-group">']
+    for idx, q in enumerate(questions):
+        qtype = getattr(q, "qtype", "multiple_choice")
+        name_prefix = f"iq_{sub_id}_"
+        opts_html = _render_question_options(q, name_prefix, idx)
+        stem_html = _render_question_stem(q)
+        feedback_id = f"{name_prefix}{idx}_fb"
+        explanation = (q.explanation or "").strip()
+        parts.append(f'''<div class="inline-quiz" data-q="{idx}" data-a="{q.correct_index}" data-qtype="{qtype}" data-feedback="{feedback_id}">
+  <span class="inline-quiz-tag">💡 Pregunta de repaso</span>
+  <p class="quiz-question">{stem_html}</p>
+  <div class="quiz-options" role="radiogroup" aria-label="Opciones de respuesta">
+    {opts_html}
+  </div>
+  <button type="button" class="btn-inline-check" onclick="evaluarInline(this)">Comprobar</button>
+  <div id="{feedback_id}" class="quiz-feedback" role="status" aria-live="polite"
+       data-explanation="{_h(explanation)}"></div>
+</div>''')
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
+def render_topic(
+    topic: Topic,
+    course: CourseStructure,
+    theme: Theme,
+    pdf_filename: Optional[str] = None,
+) -> str:
+    """Renderiza un tema completo como HTML standalone.
+
+    Args:
+        topic: el tema a renderizar
+        course: el curso completo (para metadata)
+        theme: paleta visual
+        pdf_filename: si se pasa, se añade un botón "Descargar PDF" en la
+            cabecera que apunta a `recursos/<pdf_filename>`. v0.5.
+    """
     # Sidebar items: subapartados + evaluación si hay quiz
     sidebar_items = []
     for sub in topic.subsections:
@@ -1583,7 +1936,9 @@ def render_topic(topic: Topic, course: CourseStructure, theme: Theme) -> str:
     if topic.intro:
         body_parts.append(f'<p class="lead">{_h(topic.intro)}</p>')
     for sub in topic.subsections:
-        body_parts.append(_render_subsection(sub))
+        # v0.5 Fase 2: si hay preguntas intercaladas para este subapartado, las insertamos
+        inline_qs = topic.inline_quiz.get(sub.id) if topic.inline_quiz else None
+        body_parts.append(_render_subsection(sub, inline_questions=inline_qs))
         body_parts.append('<div class="section-end"><a href="#top">↑ Subir al inicio del módulo</a></div>')
 
     if topic.quiz:
@@ -1602,6 +1957,27 @@ def render_topic(topic: Topic, course: CourseStructure, theme: Theme) -> str:
     # Lista de ids de los subapartados, para que el JS sepa cuáles trackear
     subsection_ids_json = "[" + ",".join(f'"{s.id}"' for s in topic.subsections) + "]"
 
+    # v0.5: botón de descarga del PDF en la cabecera (si está disponible)
+    pdf_btn_html = ""
+    if pdf_filename:
+        pdf_btn_html = f'''
+    <a class="pdf-download-btn" href="recursos/{_h(pdf_filename)}" download
+       aria-label="Descargar apuntes del tema en PDF">
+      <span class="pdf-icon" aria-hidden="true">📄</span>
+      <span class="pdf-label">Descargar apuntes (PDF)</span>
+    </a>'''
+
+    # v0.5 Fase 2: chips de tags bajo el título
+    tags_html = ""
+    if topic.tags:
+        chip_items = "\n".join(
+            f'<li class="tag-chip">{_h(t)}</li>' for t in topic.tags
+        )
+        tags_html = f'''
+    <ul class="tag-chips" aria-label="Etiquetas del tema">
+{chip_items}
+    </ul>'''
+
     return f'''<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1614,40 +1990,46 @@ def render_topic(topic: Topic, course: CourseStructure, theme: Theme) -> str:
 </head>
 <body>
 
-<header class="module-header">
+<a class="skip-link" href="#contenido">Saltar al contenido</a>
+
+<header class="module-header" role="banner">
   <div class="module-header-inner">
-    <div class="crumb"><span class="dot"></span> {_h(course.metadata.title.upper())}</div>
-    <div class="module-number">{topic.number:02d}</div>
+    <div class="crumb"><span class="dot" aria-hidden="true"></span> {_h(course.metadata.title.upper())}</div>
+    <div class="module-number" aria-hidden="true">{topic.number:02d}</div>
     <h1 class="module-title">{_h(topic.title)}</h1>
+    {tags_html}
     <div class="module-meta">
       <span><strong>Subapartados:</strong> {len(topic.subsections)}</span>
       <span><strong>Preguntas:</strong> {len(topic.quiz)}</span>
-      {f'<span><strong>Mastery:</strong> {mastery}%</span>' if topic.quiz else ''}
+      {f'<span><strong>Aprobado:</strong> {mastery}%</span>' if topic.quiz else ''}
     </div>
+    {pdf_btn_html}
   </div>
 </header>
 
 <div class="module-layout">
 
-  <aside class="module-sidebar" aria-label="Índice del tema">
+  <nav class="module-sidebar" aria-label="Índice del tema">
     <div class="sidebar-title">En este tema</div>
     <ol class="sidebar-nav">
       {sidebar_html}
     </ol>
-  </aside>
+  </nav>
 
-  <main class="module-main" id="top">
+  <main class="module-main" id="contenido" tabindex="-1">
+    <span id="top" aria-hidden="true"></span>
     {body_html}
 
     <div class="nav-bottom">
-      <button class="nav-btn primary" onclick="finalizarTema()">Completar tema ✓</button>
+      <button class="nav-btn primary" onclick="finalizarTema()" aria-describedby="completar-help">Completar tema ✓</button>
+      <p id="completar-help" class="sr-only">Marca el tema como completado en la plataforma de formación.</p>
     </div>
 
   </main>
 
 </div>
 
-<footer class="module-footer">
+<footer class="module-footer" role="contentinfo">
   <div class="module-footer-inner">
     <div class="brand">{_h(course.metadata.title)}</div>
     <div>{_h(course.metadata.author or 'Curso e-learning')} · v1.0</div>
@@ -1669,9 +2051,21 @@ var SUBSECTION_IDS = {subsection_ids_json};
 </html>'''
 
 
-def render_html(course: CourseStructure, theme: Theme) -> Dict[int, str]:
-    """Renderiza todos los temas del curso. Devuelve {numero_tema: html}."""
+def render_html(
+    course: CourseStructure,
+    theme: Theme,
+    pdf_filenames: Optional[Dict[int, str]] = None,
+) -> Dict[int, str]:
+    """Renderiza todos los temas del curso. Devuelve {numero_tema: html}.
+
+    Args:
+        course: el curso completo
+        theme: paleta visual
+        pdf_filenames: opcional, {numero_tema: nombre_pdf} para añadir el
+            botón "Descargar PDF" en cada tema (v0.5).
+    """
+    pdfs = pdf_filenames or {}
     return {
-        topic.number: render_topic(topic, course, theme)
+        topic.number: render_topic(topic, course, theme, pdf_filename=pdfs.get(topic.number))
         for topic in course.topics
     }
