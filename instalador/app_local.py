@@ -1630,16 +1630,16 @@ def course_detail(token):
     </div>
     {warns_html}
     <script>
-    async function exportFormat(kind, token) {{{{
+    async function exportFormat(kind, token) {{
       const url = '/api/curso/' + token + '/export-' + (kind === 'html' ? 'html' : 'scorm2004');
-      try {{{{
-        const r = await fetch(url, {{{{method: 'POST'}}}});
+      try {{
+        const r = await fetch(url, {{method: 'POST'}});
         const data = await r.json();
-        if (!r.ok) {{{{ alert('Error: ' + (data.error || 'desconocido')); return; }}}}
+        if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
         // Descargar
         window.location.href = '/curso/' + token + '/export/' + (kind === 'html' ? 'html' : 'scorm2004');
-      }}}} catch (e) {{{{ alert('Error: ' + e.message); }}}}
-    }}}}
+      }} catch (e) {{ alert('Error: ' + e.message); }}
+    }}
     </script>
     <style>
     .course-meta-pill {{
