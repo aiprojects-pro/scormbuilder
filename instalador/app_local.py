@@ -20,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import threading
+from typing import Optional, List
 import uuid
 import webbrowser
 import zipfile
@@ -120,6 +121,70 @@ def init_db():
 
 
 init_db()
+
+
+# ============================================================
+# v0.5.5: SISTEMA DE JOBS EN SEGUNDO PLANO
+# ============================================================
+# Operaciones largas (procesar 10 temas con IA, generar 46 alt-texts) exceden
+# el timeout de gunicorn. Los lanzamos en un thread y exponemos un endpoint
+# de polling para que el cliente sepa el progreso.
+# El registro es en memoria; un reinicio del proceso pierde los jobs en curso,
+# pero structure.json siempre queda persistido (la snapshot previa permite
+# revertir si algo se quedó a medias).
+
+import time as _bg_time
+
+_jobs_lock = threading.Lock()
+_jobs: dict[str, dict] = {}     # job_id -> {state, progress, total, current, ...}
+_JOB_TTL_SECONDS = 3600          # los jobs terminados se purgan tras 1 h
+
+
+def _new_job(kind: str, token: str, total: int) -> str:
+    """Crea un job y devuelve su id."""
+    jid = uuid.uuid4().hex[:16]
+    with _jobs_lock:
+        # Purgar jobs viejos
+        now = _bg_time.time()
+        expired = [k for k, v in _jobs.items() if (now - v.get("updated", now)) > _JOB_TTL_SECONDS]
+        for k in expired:
+            _jobs.pop(k, None)
+        _jobs[jid] = {
+            "kind": kind,
+            "token": token,
+            "state": "running",
+            "progress": 0,
+            "total": total,
+            "current_step": "",
+            "result": None,
+            "error": None,
+            "started": now,
+            "updated": now,
+            "log": [],          # mensajes incrementales (max 50)
+        }
+    return jid
+
+
+def _update_job(jid: str, **fields):
+    """Actualiza campos de un job. Si añade 'log_msg' va a la lista log."""
+    with _jobs_lock:
+        if jid not in _jobs:
+            return
+        msg = fields.pop("log_msg", None)
+        if msg:
+            _jobs[jid]["log"].append(msg)
+            if len(_jobs[jid]["log"]) > 50:
+                _jobs[jid]["log"] = _jobs[jid]["log"][-50:]
+        _jobs[jid].update(fields)
+        _jobs[jid]["updated"] = _bg_time.time()
+
+
+def _get_job(jid: str) -> Optional[dict]:
+    with _jobs_lock:
+        j = _jobs.get(jid)
+        if j is None:
+            return None
+        return dict(j)  # copia defensiva
 
 
 # ============================================================
@@ -295,7 +360,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.1</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.6</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -1721,8 +1786,8 @@ def course_edit(token):
     function markDirty() {{
       if (!dirty) {{
         dirty = true;
-        const ind = document.getElementById('ed-dirty-indicator');
-        if (ind) ind.style.display = 'inline-block';
+        const inds = document.querySelectorAll('.ed-dirty-indicator');
+        inds.forEach(ind => ind.style.display = 'inline-block');
       }}
     }}
 
@@ -1739,9 +1804,63 @@ def course_edit(token):
       return (s || "").replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
     }}
 
+    // ============================================================
+    // v0.5.6: Toolbar de acciones globales (renderizada arriba Y abajo)
+    // ============================================================
+    function buildToolbarHtml(position) {{
+      // position = 'top' | 'bottom' — diferencia en clase para CSS
+      // Cada botón lleva una clase data-act-XXX que permite duplicar handlers
+      let h = '';
+      // Banner enrich
+      h += '<div class="ed-enrich-banner ed-toolbar-' + position + '">';
+      h += '<div class="ed-enrich-banner-text">';
+      h += '<strong>✨ ¿Quieres mejorar todo el curso con IA?</strong> ';
+      h += 'Pulsa para que la IA genere <strong>etiquetas temáticas</strong>, convierta los párrafos clave en ';
+      h += '<strong>callouts visuales</strong> ([CLAVE], [ALERTA], [CITA]...) y cree un ';
+      h += '<strong>quiz mixto</strong> (test + V/F + huecos). ';
+      h += 'Verás una <strong>barra de progreso</strong> mientras se procesa.';
+      h += '</div>';
+      h += '<button type="button" class="btn-ai btn-enrich-all ed-act-enrich-all">✨ Aplicar mejoras IA al curso completo</button>';
+      h += '</div>';
+      // Botones globales
+      h += '<div class="ed-actions ed-toolbar-' + position + '">';
+      h += '<button class="btn ed-act-save">💾 Guardar y reempaquetar</button>';
+      h += '<button type="button" class="btn secondary ed-act-discard" title="Descartar cambios desde el último guardado">↺ Descartar cambios</button>';
+      h += '<a class="btn secondary" href="/curso/' + TOKEN + '">Salir</a>';
+      h += '<button type="button" class="btn-ai ed-act-glossary">📖 Generar glosario del curso con IA</button>';
+      h += '<button type="button" class="btn-ai ed-act-alt-text-all">🖼️ Generar alt-text para todas las imágenes</button>';
+      h += '<button type="button" class="btn-ai ed-act-tts">🔊 Generar narración TTS de todo el curso</button>';
+      h += '<button type="button" class="btn secondary ed-act-wcag-check">🔍 Validar WCAG 2.1 AA</button>';
+      h += '<button type="button" class="btn secondary ed-act-preview">👁 Vista previa del SCORM</button>';
+      h += '<button type="button" class="btn-ai ed-act-aiken-ext">📚 Banco Aiken extendido con IA (30 pregs / tema)</button>';
+      h += '<button type="button" class="btn secondary ed-act-export-imscp">📦 Exportar como IMS CP (Moodle)</button>';
+      h += '<button type="button" class="btn secondary ed-act-export-cmi5">⚡ Exportar como cmi5 / xAPI</button>';
+      h += '<span class="ed-dirty-indicator" style="display:' + (dirty ? 'inline-block' : 'none') + '; background:#fbbf24; color:#78350f; padding:0.3rem 0.6rem; border-radius:4px; font-size:0.8rem; font-weight:600;">● Cambios sin guardar</span>';
+      h += '<span class="ed-status"></span>';
+      h += '</div>';
+      return h;
+    }}
+
+    // Helper: vincula un handler a todos los botones que tengan una clase de acción
+    function bindAct(actionName, handler) {{
+      document.querySelectorAll('.ed-act-' + actionName).forEach(btn => {{
+        btn.onclick = handler;
+      }});
+    }}
+
+    function bindAllActions() {{
+      // Save y Discard (handlers definidos abajo)
+      bindAct('save', save);
+      bindAct('discard', restoreSnapshot);
+      // El resto de handlers se enganchan más abajo (después del render())
+      // mediante bindAct() llamado desde cada bloque correspondiente.
+    }}
+
     function render() {{
       const root = document.getElementById('editor-root');
       let html = '';
+      // v0.5.6: Banner enrich + toolbar TAMBIÉN ARRIBA (acceso rápido)
+      html += buildToolbarHtml('top');
       // Metadatos
       const md = course.metadata;
       html += '<div class="ed-card">';
@@ -1925,38 +2044,13 @@ def course_edit(token):
       html += '<button type="button" class="btn-struct btn-add-wide" data-action="topic-add">+ Añadir tema nuevo</button>';
 
       // ============================================================
-      // BANNER: aplicar mejoras IA al curso en un solo clic (v0.5.1)
+      // v0.5.6: Banner enrich + toolbar también ABAJO (versión completa)
       // ============================================================
-      html += '<div class="ed-enrich-banner">';
-      html += '<div class="ed-enrich-banner-text">';
-      html += '<strong>✨ ¿Primera vez en el editor?</strong> ';
-      html += 'Pulsa el botón para que la IA enriquezca tu curso automáticamente. ';
-      html += 'Generará <strong>etiquetas temáticas</strong>, convertirá los párrafos clave en ';
-      html += '<strong>callouts visuales</strong> ([CLAVE], [ALERTA], [CITA]...) y creará un ';
-      html += '<strong>quiz mixto</strong> (test + V/F + huecos) en los temas con pocas preguntas. ';
-      html += 'Luego puedes ver el resultado con <em>👁 Vista previa</em>.';
-      html += '</div>';
-      html += '<button type="button" class="btn-ai btn-enrich-all" id="ed-enrich-all">✨ Aplicar mejoras IA al curso completo</button>';
-      html += '</div>';
-
-      html += '<div class="ed-actions">';
-      html += '<button class="btn" id="ed-save">💾 Guardar y reempaquetar</button>';
-      html += '<button type="button" class="btn secondary" onclick="restoreSnapshot()" title="Descartar cambios desde el último guardado">↺ Descartar cambios</button>';
-      html += '<a class="btn secondary" href="/curso/' + TOKEN + '">Salir</a>';
-      html += '<button type="button" class="btn-ai" id="ed-glossary">📖 Generar glosario del curso con IA</button>';
-      html += '<button type="button" class="btn-ai" id="ed-alt-text-all">🖼️ Generar alt-text para todas las imágenes</button>';
-      html += '<button type="button" class="btn-ai" id="ed-tts">🔊 Generar narración TTS de todo el curso</button>';
-      html += '<button type="button" class="btn secondary" id="ed-wcag-check">🔍 Validar WCAG 2.1 AA</button>';
-      html += '<button type="button" class="btn secondary" id="ed-preview">👁 Vista previa del SCORM</button>';
-      html += '<button type="button" class="btn-ai" id="ed-aiken-ext">📚 Banco Aiken extendido con IA (30 pregs / tema)</button>';
-      html += '<button type="button" class="btn secondary" id="ed-export-imscp">📦 Exportar como IMS CP (Moodle)</button>';
-      html += '<button type="button" class="btn secondary" id="ed-export-cmi5">⚡ Exportar como cmi5 / xAPI</button>';
-      html += '<span id="ed-dirty-indicator" style="display:' + (dirty ? 'inline-block' : 'none') + '; background:#fbbf24; color:#78350f; padding:0.3rem 0.6rem; border-radius:4px; font-size:0.8rem; font-weight:600;">● Cambios sin guardar</span>';
-      html += '<span id="ed-status"></span>';
-      html += '</div>';
+      html += buildToolbarHtml('bottom');
 
       root.innerHTML = html;
-      document.getElementById('ed-save').onclick = save;
+      // Bind de los botones (top y bottom comparten las mismas clases data-action)
+      bindAllActions();
 
       // Helper: marca botón ocupado y llama a un endpoint, luego restaura
       async function callAI(btn, url, payload) {{
@@ -1985,8 +2079,7 @@ def course_edit(token):
       }}
 
       function setStatus(msg) {{
-        const status = document.getElementById('ed-status');
-        if (status) status.textContent = msg;
+        document.querySelectorAll('.ed-status').forEach(s => s.textContent = msg);
       }}
 
       // ----- Botones de quiz (generar / añadir) -----
@@ -2056,9 +2149,7 @@ def course_edit(token):
       }});
 
       // ----- Botón glosario del curso -----
-      const gloBtn = document.getElementById('ed-glossary');
-      if (gloBtn) {{
-        gloBtn.onclick = async () => {{
+      bindAct('glossary', async () => {{
           collectChanges();
           const data = await callAI(gloBtn, '/api/curso/' + TOKEN + '/ai-glossary', {{}});
           if (!data) return;
@@ -2084,13 +2175,9 @@ def course_edit(token):
           course.topics.push(newTopic);
           render();
           markDirty(); setStatus('✓ Glosario con ' + items.length + ' términos añadido como tema final. Revísalo y guarda.');
-        }};
-      }}
-
+        }});
       // ----- v0.5.4: Botón alt-text para TODAS las imágenes -----
-      const altAllBtn = document.getElementById('ed-alt-text-all');
-      if (altAllBtn) {{
-        altAllBtn.onclick = async () => {{
+      bindAct('alt-text-all', async () => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -2101,18 +2188,20 @@ def course_edit(token):
             if (!r.ok) {{ alert('Guarda los cambios manualmente primero.'); return; }}
             dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
           }}
-          if (!confirm('La IA generará alt-text descriptivo para TODAS las imágenes del curso que aún no lo tengan.\\n\\nPuede tardar 5-15 segundos por imagen.\\nSe creará una snapshot previa por si quieres revertir.\\n\\n¿Continuar?')) return;
+          if (!confirm('La IA generará alt-text descriptivo para TODAS las imágenes del curso que aún no lo tengan.\\n\\nVerás el progreso en una barra. Puede tardar 5-15 segundos por imagen.\\nSe creará una snapshot previa por si quieres revertir.\\n\\n¿Continuar?')) return;
 
-          const orig = altAllBtn.textContent;
-          altAllBtn.disabled = true;
-          altAllBtn.textContent = '⏳ Procesando imágenes... (no cierres la pestaña)';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/ai-alt-text-all', {{method: 'POST'}});
-            const data = await r.json();
-            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
-            const s = data.summary || {{}};
+            const launch = await r.json();
+            if (!r.ok) {{ alert('Error al iniciar: ' + (launch.error || 'desconocido')); return; }}
+            const finalResult = await runJobWithProgress(
+              launch.job_id, launch.total,
+              '🖼️ Generando alt-text de imágenes',
+              'Procesando ' + launch.total + ' imagen(es)...'
+            );
+            if (!finalResult) return;
 
-            // Recargar estructura
+            const s = finalResult.result.summary || {{}};
             const r2 = await fetch(API_GET);
             if (r2.ok) {{
               course = await r2.json();
@@ -2120,32 +2209,24 @@ def course_edit(token):
               dirty = false;
               render();
             }}
-
             let msg = '✓ Alt-text generado:\\n\\n';
             msg += '  • ' + (s.total_images || 0) + ' imágenes encontradas\\n';
             msg += '  • ' + (s.generated || 0) + ' alt-text generados\\n';
             if (s.already_with_alt) msg += '  • ' + s.already_with_alt + ' ya tenían alt (saltadas)\\n';
             if (s.skipped_external) msg += '  • ' + s.skipped_external + ' imágenes externas (URLs)\\n';
             if (s.failed) msg += '  • ⚠ ' + s.failed + ' fallaron\\n';
-            if (data.errors && data.errors.length) {{
-              msg += '\\nErrores (primeros): ' + data.errors.slice(0,3).join(', ');
+            if (finalResult.result.errors && finalResult.result.errors.length) {{
+              msg += '\\nErrores (primeros): ' + finalResult.result.errors.slice(0,3).join(', ');
             }}
-            msg += '\\n\\nSnapshot previa: ' + (data.snapshot_id || '—');
+            msg += '\\n\\nSnapshot previa: ' + (finalResult.snapshot_id || '—');
             alert(msg);
             setStatus('✓ ' + (s.generated || 0) + ' alt-text generados. Pulsa "💾 Guardar y reempaquetar" para incluirlos en el SCORM final.');
           }} catch (e) {{
             alert('Error: ' + e.message);
-          }} finally {{
-            altAllBtn.disabled = false;
-            altAllBtn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       // ----- Botón TTS del curso -----
-      const ttsBtn = document.getElementById('ed-tts');
-      if (ttsBtn) {{
-        ttsBtn.onclick = async () => {{
+      bindAct('tts', async () => {{
           if (!confirm('Esto generará un archivo de audio por cada subapartado del curso. Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
           // El backend modifica directamente structure.json y devuelve métricas.
@@ -2175,9 +2256,7 @@ def course_edit(token):
             ttsBtn.disabled = false;
             ttsBtn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       // ============================================================
       // HANDLERS FASE 3 (v0.5): UI para endpoints IA de Fase 2
       // ============================================================
@@ -2266,9 +2345,7 @@ def course_edit(token):
       }});
 
       // ----- BANCO AIKEN EXTENDIDO -----
-      const aikenBtn = document.getElementById('ed-aiken-ext');
-      if (aikenBtn) {{
-        aikenBtn.onclick = async () => {{
+      bindAct('aiken-ext', async () => {{
           if (!confirm('Esto pedirá a la IA 30 preguntas adicionales por cada tema (banco para evaluación externa). Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
           const data = await callAI(aikenBtn, '/api/curso/' + TOKEN + '/ai-aiken-extendido', {{n: 30}});
@@ -2276,13 +2353,9 @@ def course_edit(token):
           const list = (data.files || []).map(f => '• ' + f).join('\\n');
           alert('✓ Banco Aiken extendido generado:\\n\\n' + list + '\\n\\nLos archivos están en la carpeta del curso (aiken_extendido/). Cuando guardes el curso se incluirán en el ZIP descargable.');
           setStatus('✓ ' + (data.files || []).length + ' bancos Aiken extendidos generados.');
-        }};
-      }}
-
+        }});
       // ----- EXPORT IMS CONTENT PACKAGE -----
-      const imsBtn = document.getElementById('ed-export-imscp');
-      if (imsBtn) {{
-        imsBtn.onclick = async () => {{
+      bindAct('export-imscp', async () => {{
           if (dirty) {{
             if (!confirm('Hay cambios sin guardar. El IMS CP se generará con la última versión guardada. ¿Continuar?')) return;
           }}
@@ -2304,9 +2377,7 @@ def course_edit(token):
             imsBtn.disabled = false;
             imsBtn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       // ============================================================
       // HANDLERS FASE 4: alt-text IA, WCAG check, vista previa iframe
       // ============================================================
@@ -2342,9 +2413,7 @@ def course_edit(token):
       }});
 
       // ----- BOTÓN "Validar WCAG 2.1 AA" -----
-      const wcagBtn = document.getElementById('ed-wcag-check');
-      if (wcagBtn) {{
-        wcagBtn.onclick = async () => {{
+      bindAct('wcag-check', async () => {{
           collectChanges();
           // Guardar primero (silenciosamente) para que el validador lea estructura actualizada
           if (dirty) {{
@@ -2370,9 +2439,7 @@ def course_edit(token):
           }} finally {{
             wcagBtn.disabled = false; wcagBtn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       function showWcagModal(report) {{
         // Cierra modal previo si existe
         document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
@@ -2409,9 +2476,7 @@ def course_edit(token):
       }}
 
       // ----- BOTÓN "Vista previa del SCORM" -----
-      const previewBtn = document.getElementById('ed-preview');
-      if (previewBtn) {{
-        previewBtn.onclick = async () => {{
+      bindAct('preview', async () => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -2427,7 +2492,119 @@ def course_edit(token):
             dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
           }}
           showPreviewModal(0);
+        }});
+      // ============================================================
+      // v0.5.5: SISTEMA DE PROGRESO PARA JOBS EN BACKGROUND
+      // ============================================================
+      // Muestra un modal con barra de progreso y hace polling al endpoint
+      // /api/jobs/<id> cada 1.5 segundos hasta que state != "running".
+      // Devuelve el "result" del job, o null si el usuario canceló.
+      async function runJobWithProgress(jobId, total, title, subtitle) {{
+        // Crear modal
+        document.querySelectorAll('.ed-modal-overlay').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'ed-modal-overlay ed-progress-overlay';
+        overlay.innerHTML = '<div class="ed-modal-card ed-progress-card">' +
+          '<div class="ed-modal-head">' +
+            '<h3>' + escapeHtml(title) + '</h3>' +
+          '</div>' +
+          '<div class="ed-modal-body">' +
+            '<p class="ed-progress-subtitle">' + escapeHtml(subtitle) + '</p>' +
+            '<div class="ed-progress-bar-wrap">' +
+              '<div class="ed-progress-bar" id="ed-progress-bar" style="width:0%"></div>' +
+            '</div>' +
+            '<div class="ed-progress-stats">' +
+              '<span id="ed-progress-count">0 / ' + total + '</span>' +
+              '<span id="ed-progress-elapsed">00:00</span>' +
+            '</div>' +
+            '<div class="ed-progress-step" id="ed-progress-step">Iniciando…</div>' +
+            '<div class="ed-progress-log" id="ed-progress-log"></div>' +
+            '<p style="margin-top:1rem;font-size:0.82rem;color:var(--ink-mute);">' +
+              'Puedes minimizar esta ventana y seguir trabajando. ' +
+              'El proceso continúa en el servidor aunque cierres el navegador. ' +
+              'Vuelve a abrir la pestaña en cualquier momento y verás el progreso actualizado.' +
+            '</p>' +
+          '</div>' +
+          '<div class="ed-modal-foot">' +
+            '<button type="button" class="btn secondary" id="ed-progress-minimize">Minimizar</button>' +
+          '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+        const bar = overlay.querySelector('#ed-progress-bar');
+        const count = overlay.querySelector('#ed-progress-count');
+        const elapsed = overlay.querySelector('#ed-progress-elapsed');
+        const step = overlay.querySelector('#ed-progress-step');
+        const logEl = overlay.querySelector('#ed-progress-log');
+        let minimized = false;
+        overlay.querySelector('#ed-progress-minimize').onclick = () => {{
+          minimized = true;
+          overlay.style.display = 'none';
+          // Crear un mini-indicador esquinero
+          const mini = document.createElement('div');
+          mini.id = 'ed-mini-progress';
+          mini.className = 'ed-mini-progress';
+          mini.innerHTML = '<span class="dot"></span> ' + escapeHtml(title) + ' · <span class="prog">0%</span>';
+          mini.onclick = () => {{
+            mini.remove();
+            overlay.style.display = '';
+            minimized = false;
+          }};
+          document.body.appendChild(mini);
         }};
+
+        // Polling
+        const startTs = Date.now();
+        const fmtElapsed = (ms) => {{
+          const s = Math.floor(ms / 1000);
+          const mm = String(Math.floor(s / 60)).padStart(2, '0');
+          const ss = String(s % 60).padStart(2, '0');
+          return mm + ':' + ss;
+        }};
+        return new Promise((resolve) => {{
+          const poll = async () => {{
+            try {{
+              const r = await fetch('/api/jobs/' + jobId);
+              if (!r.ok) {{
+                step.textContent = '⚠ No se puede consultar el job (sesión caducada?)';
+                setTimeout(poll, 2500);
+                return;
+              }}
+              const j = await r.json();
+              const pct = j.total ? Math.round((j.progress / j.total) * 100) : 0;
+              bar.style.width = pct + '%';
+              count.textContent = j.progress + ' / ' + j.total;
+              elapsed.textContent = fmtElapsed(Date.now() - startTs);
+              if (j.current_step) step.textContent = j.current_step;
+              if (j.log && j.log.length) {{
+                logEl.innerHTML = j.log.slice(-6).map(l =>
+                  '<div class="ed-log-line">' + escapeHtml(l) + '</div>'
+                ).join('');
+                logEl.scrollTop = logEl.scrollHeight;
+              }}
+              const miniEl = document.getElementById('ed-mini-progress');
+              if (miniEl) {{
+                miniEl.querySelector('.prog').textContent = pct + '%';
+              }}
+
+              if (j.state === 'done') {{
+                overlay.remove();
+                if (miniEl) miniEl.remove();
+                resolve(j);
+              }} else if (j.state === 'error') {{
+                overlay.remove();
+                if (miniEl) miniEl.remove();
+                alert('❌ Error procesando el curso:\\n\\n' + (j.error || 'Error desconocido'));
+                resolve(null);
+              }} else {{
+                setTimeout(poll, 1500);
+              }}
+            }} catch (e) {{
+              step.textContent = '⚠ Error de red, reintentando...';
+              setTimeout(poll, 3000);
+            }}
+          }};
+          poll();
+        }});
       }}
 
       function showPreviewModal(topicIndex) {{
@@ -2642,9 +2819,7 @@ def course_edit(token):
       }}
 
       // ----- CMI5 EXPORT -----
-      const cmi5Btn = document.getElementById('ed-export-cmi5');
-      if (cmi5Btn) {{
-        cmi5Btn.onclick = async () => {{
+      bindAct('export-cmi5', async () => {{
           if (dirty) {{
             if (!confirm('Hay cambios sin guardar. El paquete cmi5 se generará con la última versión guardada. ¿Continuar?')) return;
           }}
@@ -2658,13 +2833,9 @@ def course_edit(token):
           }} finally {{
             cmi5Btn.disabled = false; cmi5Btn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       // ----- APLICAR MEJORAS IA AL CURSO COMPLETO (v0.5.1) -----
-      const enrichAllBtn = document.getElementById('ed-enrich-all');
-      if (enrichAllBtn) {{
-        enrichAllBtn.onclick = async () => {{
+      bindAct('enrich-all', async () => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -2679,18 +2850,23 @@ def course_edit(token):
                        '  • Generar etiquetas (tags) en los temas que no tengan.\\n' +
                        '  • Convertir párrafos clave en callouts ([CLAVE], [ALERTA]...).\\n' +
                        '  • Crear un quiz mixto (test + V/F + huecos) en los temas con < 3 preguntas.\\n\\n' +
-                       'Se creará una snapshot previa por si quieres revertir.\\n' +
-                       'Esto puede tardar 30-90 segundos por tema.\\n\\n¿Continuar?')) return;
+                       'Verás el progreso en una barra. Puedes seguir trabajando en otra pestaña.\\n' +
+                       'Se creará una snapshot previa por si quieres revertir.\\n\\n¿Continuar?')) return;
 
-          const orig = enrichAllBtn.textContent;
-          enrichAllBtn.disabled = true;
-          enrichAllBtn.textContent = '⏳ Procesando temas... (puede tardar 1-2 min)';
           try {{
+            // Lanzar job en background
             const r = await fetch('/api/curso/' + TOKEN + '/ai-enrich-all', {{method: 'POST'}});
-            const data = await r.json();
-            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
-            const s = data.summary || {{}};
+            const launch = await r.json();
+            if (!r.ok) {{ alert('Error al iniciar: ' + (launch.error || 'desconocido')); return; }}
+            // Mostrar modal de progreso y hacer polling
+            const finalResult = await runJobWithProgress(
+              launch.job_id, launch.total,
+              '✨ Aplicando mejoras IA al curso',
+              'Procesando ' + launch.total + ' tema(s)...'
+            );
+            if (!finalResult) return;   // cancelado por el usuario
 
+            const s = finalResult.result.summary || {{}};
             // Recargar estructura
             const r2 = await fetch(API_GET);
             if (r2.ok) {{
@@ -2699,7 +2875,6 @@ def course_edit(token):
               dirty = false;
               render();
             }}
-
             let msg = '✓ Mejoras IA aplicadas:\\n\\n';
             msg += '  • ' + (s.topics_processed || 0) + ' tema(s) procesados\\n';
             msg += '  • ' + (s.tags_generated || 0) + ' etiquetas generadas\\n';
@@ -2707,9 +2882,9 @@ def course_edit(token):
             msg += '  • ' + (s.quiz_final_generated || 0) + ' preguntas del bloque final generadas\\n';
             msg += '  • ' + (s.quiz_inline_generated || 0) + ' preguntas de repaso intercaladas\\n';
             if (s.errors && s.errors.length) {{
-              msg += '\\n⚠ ' + s.errors.length + ' error(es):\\n  - ' + s.errors.join('\\n  - ');
+              msg += '\\n⚠ ' + s.errors.length + ' error(es):\\n  - ' + s.errors.slice(0,5).join('\\n  - ');
             }}
-            msg += '\\n\\nSnapshot previa: ' + (data.snapshot_id || '—');
+            msg += '\\n\\nSnapshot previa: ' + (finalResult.snapshot_id || '—');
             msg += '\\n\\n¿Abrir vista previa para ver el resultado?';
             if (confirm(msg)) {{
               showPreviewModal(0);
@@ -2718,13 +2893,8 @@ def course_edit(token):
             }}
           }} catch (e) {{
             alert('Error: ' + e.message);
-          }} finally {{
-            enrichAllBtn.disabled = false;
-            enrichAllBtn.textContent = orig;
           }}
-        }};
-      }}
-
+        }});
       // ----- Menús de reescritura por bloque -----
       document.querySelectorAll('.ed-ai-opt').forEach(btn => {{
         btn.onclick = async () => {{
@@ -3003,10 +3173,9 @@ def course_edit(token):
 
     async function save() {{
       collectChanges();
-      const status = document.getElementById('ed-status');
-      const btn = document.getElementById('ed-save');
-      btn.disabled = true;
-      status.textContent = 'Reempaquetando…';
+      const saveBtns = document.querySelectorAll('.ed-act-save');
+      saveBtns.forEach(b => b.disabled = true);
+      setStatus('Reempaquetando…');
       try {{
         const r = await fetch(API_SAVE, {{
           method: 'POST',
@@ -3020,23 +3189,22 @@ def course_edit(token):
             const errsList = data.validation_errors.map(e => '  • ' + e).join('\\n');
             alert('No se puede guardar el curso:\\n\\n' + errsList +
                   '\\n\\nCorrige estos problemas y vuelve a intentarlo.');
-            status.textContent = '✗ ' + data.validation_errors.length + ' problemas de estructura. Corrige y guarda.';
+            setStatus('✗ ' + data.validation_errors.length + ' problemas de estructura. Corrige y guarda.');
           }} else {{
-            status.textContent = 'Error: ' + (data.error || 'desconocido');
+            setStatus('Error: ' + (data.error || 'desconocido'));
           }}
-          btn.disabled = false;
+          saveBtns.forEach(b => b.disabled = false);
           return;
         }}
         // Save OK: reset del flag dirty y actualizar snapshot
         dirty = false;
         courseSnapshot = JSON.parse(JSON.stringify(course));
-        const ind = document.getElementById('ed-dirty-indicator');
-        if (ind) ind.style.display = 'none';
-        status.textContent = '✓ Guardado correctamente. SCORM reempaquetado.';
-        btn.disabled = false;
+        document.querySelectorAll('.ed-dirty-indicator').forEach(ind => ind.style.display = 'none');
+        setStatus('✓ Guardado correctamente. SCORM reempaquetado.');
+        saveBtns.forEach(b => b.disabled = false);
       }} catch (e) {{
-        status.textContent = 'Error: ' + e.message;
-        btn.disabled = false;
+        setStatus('Error: ' + e.message);
+        saveBtns.forEach(b => b.disabled = false);
       }}
     }}
 
@@ -3047,8 +3215,7 @@ def course_edit(token):
       if (!confirm('¿Descartar todos los cambios desde el último guardado?')) return;
       course = JSON.parse(JSON.stringify(courseSnapshot));
       dirty = false;
-      const ind = document.getElementById('ed-dirty-indicator');
-      if (ind) ind.style.display = 'none';
+      document.querySelectorAll('.ed-dirty-indicator').forEach(ind => ind.style.display = 'none');
       render();
       setStatus('✓ Cambios descartados. Estructura restaurada.');
     }}
@@ -3621,6 +3788,104 @@ def course_edit(token):
     .btn-enrich-all:disabled {{
       opacity: 0.7;
       cursor: not-allowed;
+    }}
+
+    /* =========================================================
+       v0.5.5: BARRA DE PROGRESO PARA JOBS EN BACKGROUND
+       ========================================================= */
+    .ed-progress-card {{
+      max-width: 600px;
+      width: 90%;
+    }}
+    .ed-progress-subtitle {{
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+      margin: 0 0 1rem 0;
+    }}
+    .ed-progress-bar-wrap {{
+      width: 100%;
+      height: 16px;
+      background: #f3f4f6;
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 1rem 0 0.6rem 0;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
+    }}
+    .ed-progress-bar {{
+      height: 100%;
+      background: linear-gradient(90deg, #8b5cf6, #6366f1);
+      border-radius: 8px;
+      transition: width 0.5s ease-out;
+      box-shadow: 0 1px 3px rgba(99, 102, 241, 0.3);
+    }}
+    .ed-progress-stats {{
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--ink-mute);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }}
+    .ed-progress-step {{
+      margin: 0.8rem 0;
+      padding: 0.6rem 0.8rem;
+      background: #f9fafb;
+      border-left: 3px solid #6366f1;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: var(--ink);
+      min-height: 2.4rem;
+    }}
+    .ed-progress-log {{
+      max-height: 140px;
+      overflow-y: auto;
+      background: #1f2937;
+      color: #d1d5db;
+      padding: 0.6rem 0.8rem;
+      border-radius: 4px;
+      font-family: ui-monospace, "SF Mono", monospace;
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }}
+    .ed-log-line {{
+      padding: 0.15rem 0;
+    }}
+    /* Mini-indicador esquinero cuando se minimiza */
+    .ed-mini-progress {{
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: linear-gradient(135deg, #8b5cf6, #6366f1);
+      color: white;
+      padding: 0.7rem 1.1rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: transform 0.15s;
+    }}
+    .ed-mini-progress:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+    }}
+    .ed-mini-progress .dot {{
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #fbbf24;
+      animation: pulse 1.2s infinite ease-in-out;
+    }}
+    @keyframes pulse {{
+      0%, 100% {{ transform: scale(1); opacity: 1; }}
+      50% {{ transform: scale(1.3); opacity: 0.7; }}
+    }}
+    .ed-mini-progress .prog {{
+      font-variant-numeric: tabular-nums;
     }}
     </style>
     """
@@ -4241,18 +4506,12 @@ def course_ai_alt_text_block(token):
 @app.route("/api/curso/<token>/ai-alt-text-all", methods=["POST"])
 @login_required
 def course_ai_alt_text_all(token):
-    """v0.5.4: Genera alt-text para TODAS las imágenes del curso que no tengan.
+    """v0.5.5: Lanza job en segundo plano que genera alt-text para todas
+    las imágenes del curso. Devuelve {job_id, total, snapshot_id}.
 
-    Recorre structure.json buscando bloques type=image sin "text" (alt-text)
-    y llama a la IA por cada imagen. Salta las que ya tienen alt y las que
-    apuntan a URLs externas.
-
-    Crea snapshot previa.
-
-    Devuelve summary con total_images, already_with_alt, generated, failed,
-    skipped_external + lista de errores.
+    El cliente hace polling a /api/jobs/<job_id>.
     """
-    from scorm_builder.ai_assist import is_available, generate_alt_text
+    from scorm_builder.ai_assist import is_available
     if not is_available():
         return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
 
@@ -4271,70 +4530,114 @@ def course_ai_alt_text_all(token):
 
     snap_id = _save_snapshot(job_dir, label="pre_alt_all")
 
+    # Contar imágenes pendientes (sin alt y locales)
     with open(structure_path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    recursos_dir = job_dir / "recursos"
-    total_images = 0
-    already_with_alt = 0
-    generated = 0
-    failed = 0
-    skipped_external = 0
-    errors: List[str] = []
-
-    for ti, topic in enumerate(data.get("topics", [])):
+        data_count = json.load(f)
+    total_pending = 0
+    for topic in data_count.get("topics", []):
         for sub in topic.get("subsections", []):
             for b in sub.get("blocks", []):
                 if b.get("type") != "image":
                     continue
-                total_images += 1
                 if (b.get("text") or "").strip():
-                    already_with_alt += 1
                     continue
-                extras = b.get("extras") or {}
-                src = (extras.get("src") or "").strip()
-                if not src:
-                    skipped_external += 1
+                src = ((b.get("extras") or {}).get("src") or "").strip()
+                if not src or src.startswith(("http://", "https://", "data:")):
                     continue
-                if src.startswith(("http://", "https://", "data:")):
-                    skipped_external += 1
-                    continue
-                # Búsqueda igual que ai-alt-text-block: raíz, luego rglob
-                img_path = recursos_dir / src
-                if not img_path.exists():
-                    matches = list(recursos_dir.rglob(src)) if recursos_dir.exists() else []
-                    if matches:
-                        img_path = matches[0]
-                    else:
-                        failed += 1
-                        errors.append(f"Tema {ti+1}: no se encuentra '{src}'")
-                        continue
+                total_pending += 1
+
+    if total_pending == 0:
+        return jsonify({"error": "No hay imágenes pendientes de alt-text"}), 400
+
+    jid = _new_job("alt_text_all", token, total_pending)
+    _update_job(jid, snapshot_id=snap_id)
+
+    structure_path_str = str(structure_path)
+    recursos_dir_str = str(job_dir / "recursos")
+
+    def _alt_worker():
+        try:
+            from scorm_builder.ai_assist import generate_alt_text
+            recursos_dir = Path(recursos_dir_str)
+            with open(structure_path_str, encoding="utf-8") as f:
+                data = json.load(f)
+
+            total_images = 0
+            already_with_alt = 0
+            generated = 0
+            failed = 0
+            skipped_external = 0
+            errors_list: List[str] = []
+            processed_pending = 0
+
+            for ti, topic in enumerate(data.get("topics", [])):
+                for sub in topic.get("subsections", []):
+                    for b in sub.get("blocks", []):
+                        if b.get("type") != "image":
+                            continue
+                        total_images += 1
+                        if (b.get("text") or "").strip():
+                            already_with_alt += 1
+                            continue
+                        extras = b.get("extras") or {}
+                        src = (extras.get("src") or "").strip()
+                        if not src or src.startswith(("http://", "https://", "data:")):
+                            skipped_external += 1
+                            continue
+                        _update_job(jid,
+                                    current_step=f"Imagen {processed_pending+1}/{total_pending}: {src[:50]} (Tema {ti+1})")
+                        img_path = recursos_dir / src
+                        if not img_path.exists():
+                            matches = list(recursos_dir.rglob(src)) if recursos_dir.exists() else []
+                            if matches:
+                                img_path = matches[0]
+                            else:
+                                failed += 1
+                                errors_list.append(f"Tema {ti+1}: no se encuentra '{src}'")
+                                processed_pending += 1
+                                _update_job(jid, progress=processed_pending)
+                                continue
+                        try:
+                            alt = generate_alt_text(img_path)
+                        except Exception as e:
+                            alt = None
+                            errors_list.append(f"Tema {ti+1} ({src}): excepción — {e}")
+                        if not alt:
+                            failed += 1
+                        else:
+                            b["text"] = alt
+                            generated += 1
+                        processed_pending += 1
+                        _update_job(jid, progress=processed_pending)
+
+                # Persistir tras cada tema completo
                 try:
-                    alt = generate_alt_text(img_path)
+                    with open(structure_path_str, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
                 except Exception as e:
-                    alt = None
-                    errors.append(f"Tema {ti+1} ({src}): excepción — {e}")
-                if not alt:
-                    failed += 1
-                    continue
-                b["text"] = alt
-                generated += 1
+                    errors_list.append(f"Error al persistir tras tema {ti+1}: {e}")
 
-    with open(structure_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+            _update_job(jid, state="done", current_step="Completado",
+                        result={
+                            "ok": True,
+                            "snapshot_id": snap_id,
+                            "summary": {
+                                "total_images": total_images,
+                                "already_with_alt": already_with_alt,
+                                "generated": generated,
+                                "failed": failed,
+                                "skipped_external": skipped_external,
+                            },
+                            "errors": errors_list[:30],
+                        })
+        except Exception as e:
+            import traceback
+            _update_job(jid, state="error", error=f"{type(e).__name__}: {e}",
+                        log_msg=traceback.format_exc()[:1000])
 
-    return jsonify({
-        "ok": True,
-        "snapshot_id": snap_id,
-        "summary": {
-            "total_images": total_images,
-            "already_with_alt": already_with_alt,
-            "generated": generated,
-            "failed": failed,
-            "skipped_external": skipped_external,
-        },
-        "errors": errors[:30],
-    })
+    t = threading.Thread(target=_alt_worker, daemon=True)
+    t.start()
+    return jsonify({"job_id": jid, "total": total_pending, "snapshot_id": snap_id})
 
 
 # ============================================================
@@ -4648,23 +4951,19 @@ def course_export_cmi5(token):
 @app.route("/api/curso/<token>/ai-enrich-all", methods=["POST"])
 @login_required
 def course_ai_enrich_all(token):
-    """Aplica de un solo clic a TODOS los temas:
-      1. Genera tags (5-6 por tema) si el tema aún no tiene ninguno.
-      2. Sugiere y aplica callouts automáticamente (sin pasar por modal).
-      3. Genera un quiz mixto (test + V/F + huecos) si el tema tiene < 3 preguntas.
+    """v0.5.5: Lanza un job en segundo plano que procesa todos los temas.
 
-    Crea UNA snapshot al inicio del proceso por si el usuario quiere revertir.
-    Devuelve un resumen detallado por tema con tags, callouts y quiz generados.
+    Devuelve inmediatamente {job_id, total, snapshot_id}. El cliente hace
+    polling a /api/jobs/<job_id> para ver progreso.
 
-    Es deliberadamente NO destructivo:
-      - No toca tags ya existentes (solo añade si están vacíos).
-      - No reemplaza quizzes que ya tengan 3+ preguntas (respeta los manuales).
-      - Si la IA no devuelve nada útil para un tema, lo deja como estaba.
+    Por cada tema aplica (igual que antes):
+      1. Tags (si están vacíos)
+      2. Callouts automáticos
+      3. Quiz mixto si tiene < 3 preguntas
+
+    NO destructivo: respeta tags y quizzes manuales.
     """
-    from scorm_builder.ai_assist import (
-        is_available, generate_tags, enrich_topic_with_callouts,
-        generate_quiz, QuizConfig,
-    )
+    from scorm_builder.ai_assist import is_available
     if not is_available():
         return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
 
@@ -4681,125 +4980,186 @@ def course_ai_enrich_all(token):
     if not structure_path.exists():
         return jsonify({"error": "Curso sin estructura editable"}), 404
 
-    # Snapshot previo (uno solo para todo el batch)
+    # Snapshot previo
     snap_id = _save_snapshot(job_dir, label="pre_enrich_all")
 
+    # Contar temas para informar el total al cliente
     with open(structure_path, encoding="utf-8") as f:
-        data = json.load(f)
-    topics = data.get("topics", [])
+        data_count = json.load(f)
+    total_topics = len(data_count.get("topics", []))
+    if total_topics == 0:
+        return jsonify({"error": "El curso no tiene temas"}), 400
 
-    valid_callout_types = {
-        "callout_key", "callout_alert", "callout_warn",
-        "callout_success", "quote",
-    }
-    total_tags = 0
-    total_callouts = 0
-    total_quiz_final = 0
-    total_quiz_inline = 0
-    details = []
-    errors = []
+    jid = _new_job("enrich_all", token, total_topics)
+    _update_job(jid, snapshot_id=snap_id)
 
-    # Configuración del quiz mixto: distribuye entre final + intercaladas por subapartado
-    QUIZ_CFG = QuizConfig(
-        location="mixed",  # v0.5.4: 'mixed' = bloque final + 1 pregunta por subapartado intercalada
-        types=["multiple_choice", "true_false", "fill_in"],
-        n_questions=5,
-    )
-    QUIZ_MIN_THRESHOLD = 3  # si el tema tiene menos preguntas que esto, generamos
+    # Capturamos paths para el thread (no podemos usar request/session dentro)
+    structure_path_str = str(structure_path)
 
-    for ti, topic in enumerate(topics):
-        t_detail = {
-            "topic": ti + 1,
-            "title": topic.get("title", "")[:60],
-            "tags": 0, "callouts": 0,
-            "quiz_final": 0, "quiz_inline": 0,
-        }
-
-        # 1) Tags si están vacíos
-        if not topic.get("tags"):
-            try:
-                tags = generate_tags(topic, n=6)
-                if tags:
-                    topic["tags"] = tags
-                    t_detail["tags"] = len(tags)
-                    total_tags += len(tags)
-            except Exception as e:
-                errors.append(f"Tema {ti+1}: tags falló — {e}")
-
-        # 2) Enrich con callouts
+    def _enrich_worker():
+        """Cuerpo del job, corre fuera del contexto Flask."""
         try:
-            result = enrich_topic_with_callouts(topic)
-            if result and result.get("suggestions"):
-                sub_by_id = {s.get("id"): s for s in topic.get("subsections", [])}
-                applied = 0
-                for s in result["suggestions"]:
-                    sub_id = s.get("subsection_id")
-                    bi = s.get("block_index")
-                    new_type = s.get("suggested_type", "")
-                    new_text = (s.get("suggested_text") or "").strip()
-                    sub = sub_by_id.get(sub_id)
-                    if not sub or new_type not in valid_callout_types or not new_text:
-                        continue
-                    blocks = sub.get("blocks", [])
+            from scorm_builder.ai_assist import (
+                generate_tags, enrich_topic_with_callouts,
+                generate_quiz, QuizConfig,
+            )
+            valid_callout_types = {
+                "callout_key", "callout_alert", "callout_warn",
+                "callout_success", "quote",
+            }
+            QUIZ_CFG = QuizConfig(
+                location="mixed",
+                types=["multiple_choice", "true_false", "fill_in"],
+                n_questions=5,
+            )
+            QUIZ_MIN_THRESHOLD = 3
+
+            total_tags = 0
+            total_callouts = 0
+            total_quiz_final = 0
+            total_quiz_inline = 0
+            details = []
+            errors_list = []
+
+            with open(structure_path_str, encoding="utf-8") as f:
+                data = json.load(f)
+            topics = data.get("topics", [])
+
+            for ti, topic in enumerate(topics):
+                title_short = topic.get("title", "")[:60]
+                _update_job(jid, progress=ti, current_step=f"Tema {ti+1}/{len(topics)}: {title_short}")
+
+                t_detail = {
+                    "topic": ti + 1,
+                    "title": title_short,
+                    "tags": 0, "callouts": 0,
+                    "quiz_final": 0, "quiz_inline": 0,
+                }
+
+                # 1) Tags
+                if not topic.get("tags"):
+                    _update_job(jid, current_step=f"Tema {ti+1}: generando tags...")
                     try:
-                        bi = int(bi)
-                    except (TypeError, ValueError):
-                        continue
-                    if bi < 0 or bi >= len(blocks):
-                        continue
-                    block = blocks[bi]
-                    if block.get("type") != "paragraph":
-                        continue
-                    block["type"] = new_type
-                    block["text"] = new_text
-                    block["text_html"] = None
-                    applied += 1
-                t_detail["callouts"] = applied
-                total_callouts += applied
+                        tags = generate_tags(topic, n=6)
+                        if tags:
+                            topic["tags"] = tags
+                            t_detail["tags"] = len(tags)
+                            total_tags += len(tags)
+                    except Exception as e:
+                        errors_list.append(f"Tema {ti+1}: tags falló — {e}")
+
+                # 2) Callouts
+                _update_job(jid, current_step=f"Tema {ti+1}: detectando callouts...")
+                try:
+                    result = enrich_topic_with_callouts(topic)
+                    if result and result.get("suggestions"):
+                        sub_by_id = {s.get("id"): s for s in topic.get("subsections", [])}
+                        applied = 0
+                        for s in result["suggestions"]:
+                            sub_id = s.get("subsection_id")
+                            bi = s.get("block_index")
+                            new_type = s.get("suggested_type", "")
+                            new_text = (s.get("suggested_text") or "").strip()
+                            sub = sub_by_id.get(sub_id)
+                            if not sub or new_type not in valid_callout_types or not new_text:
+                                continue
+                            blocks = sub.get("blocks", [])
+                            try:
+                                bi = int(bi)
+                            except (TypeError, ValueError):
+                                continue
+                            if bi < 0 or bi >= len(blocks):
+                                continue
+                            block = blocks[bi]
+                            if block.get("type") != "paragraph":
+                                continue
+                            block["type"] = new_type
+                            block["text"] = new_text
+                            block["text_html"] = None
+                            applied += 1
+                        t_detail["callouts"] = applied
+                        total_callouts += applied
+                except Exception as e:
+                    errors_list.append(f"Tema {ti+1}: callouts falló — {e}")
+
+                # 3) Quiz mixto
+                current_quiz_n = len(topic.get("quiz", []))
+                if current_quiz_n < QUIZ_MIN_THRESHOLD:
+                    _update_job(jid, current_step=f"Tema {ti+1}: generando quiz mixto...")
+                    try:
+                        quiz_result = generate_quiz(topic, config=QUIZ_CFG)
+                        if quiz_result and (quiz_result.get("final") or quiz_result.get("by_subsection")):
+                            final_qs = quiz_result.get("final", []) or []
+                            by_sub = quiz_result.get("by_subsection", {}) or {}
+                            topic["quiz"] = [{**q} for q in final_qs]
+                            existing_inline = topic.get("inline_quiz") or {}
+                            for sub_id, qs in by_sub.items():
+                                if sub_id not in existing_inline:
+                                    existing_inline[sub_id] = [{**q} for q in qs]
+                            topic["inline_quiz"] = existing_inline
+                            t_detail["quiz_final"] = len(final_qs)
+                            t_detail["quiz_inline"] = sum(len(v) for v in by_sub.values())
+                            total_quiz_final += t_detail["quiz_final"]
+                            total_quiz_inline += t_detail["quiz_inline"]
+                    except Exception as e:
+                        errors_list.append(f"Tema {ti+1}: quiz falló — {e}")
+
+                details.append(t_detail)
+
+                # PERSISTIR tras cada tema (resiliencia: si el worker muere, lo
+                # procesado hasta ahora se conserva)
+                try:
+                    with open(structure_path_str, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    errors_list.append(f"Tema {ti+1}: error al persistir — {e}")
+
+                _update_job(jid, progress=ti + 1,
+                            log_msg=f"✓ Tema {ti+1}: {t_detail['tags']} tags, {t_detail['callouts']} callouts, {t_detail['quiz_final']}q final + {t_detail['quiz_inline']}q inline")
+
+            # Estado final
+            _update_job(jid, state="done", current_step="Completado",
+                        result={
+                            "ok": True,
+                            "snapshot_id": snap_id,
+                            "summary": {
+                                "topics_processed": len(topics),
+                                "tags_generated": total_tags,
+                                "callouts_applied": total_callouts,
+                                "quiz_final_generated": total_quiz_final,
+                                "quiz_inline_generated": total_quiz_inline,
+                                "errors": errors_list,
+                            },
+                            "details": details,
+                        })
         except Exception as e:
-            errors.append(f"Tema {ti+1}: callouts falló — {e}")
+            import traceback
+            _update_job(jid, state="error", error=f"{type(e).__name__}: {e}",
+                        log_msg=traceback.format_exc()[:1000])
 
-        # 3) Quiz mixto si el tema tiene menos de 3 preguntas
-        current_quiz_n = len(topic.get("quiz", []))
-        if current_quiz_n < QUIZ_MIN_THRESHOLD:
-            try:
-                quiz_result = generate_quiz(topic, config=QUIZ_CFG)
-                if quiz_result and (quiz_result.get("final") or quiz_result.get("by_subsection")):
-                    final_qs = quiz_result.get("final", []) or []
-                    by_sub = quiz_result.get("by_subsection", {}) or {}
-                    # Sustituye porque current_quiz_n < 3 (poco que preservar)
-                    topic["quiz"] = [{**q} for q in final_qs]
-                    # inline_quiz: fusionamos por subapartado (no machacamos los existentes
-                    # si ya había algunos manuales)
-                    existing_inline = topic.get("inline_quiz") or {}
-                    for sub_id, qs in by_sub.items():
-                        if sub_id not in existing_inline:
-                            existing_inline[sub_id] = [{**q} for q in qs]
-                    topic["inline_quiz"] = existing_inline
-                    t_detail["quiz_final"] = len(final_qs)
-                    t_detail["quiz_inline"] = sum(len(v) for v in by_sub.values())
-                    total_quiz_final += t_detail["quiz_final"]
-                    total_quiz_inline += t_detail["quiz_inline"]
-            except Exception as e:
-                errors.append(f"Tema {ti+1}: quiz falló — {e}")
+    t = threading.Thread(target=_enrich_worker, daemon=True)
+    t.start()
+    return jsonify({"job_id": jid, "total": total_topics, "snapshot_id": snap_id})
 
-        details.append(t_detail)
 
-    with open(structure_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
+@app.route("/api/jobs/<job_id>", methods=["GET"])
+@login_required
+def job_status(job_id):
+    """v0.5.5: Estado de un job en segundo plano."""
+    j = _get_job(job_id)
+    if j is None:
+        return jsonify({"error": "Job no encontrado o expirado"}), 404
     return jsonify({
-        "ok": True,
-        "snapshot_id": snap_id,
-        "summary": {
-            "topics_processed": len(topics),
-            "tags_generated": total_tags,
-            "callouts_applied": total_callouts,
-            "quiz_final_generated": total_quiz_final,
-            "quiz_inline_generated": total_quiz_inline,
-            "errors": errors,
-        },
-        "details": details,
+        "kind": j.get("kind"),
+        "state": j["state"],
+        "progress": j["progress"],
+        "total": j["total"],
+        "current_step": j.get("current_step", ""),
+        "result": j.get("result"),
+        "error": j.get("error"),
+        "log": j.get("log", []),
+        "snapshot_id": j.get("snapshot_id"),
+        "elapsed": _bg_time.time() - j.get("started", 0),
     })
 
 
