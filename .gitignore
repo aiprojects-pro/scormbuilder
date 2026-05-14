@@ -26,3 +26,4 @@ users/
 job_*/
 _preview/
 *.log
+*.bak-*

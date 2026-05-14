@@ -4164,8 +4164,8 @@ def course_ai_alt_text_block(token):
     if not filename or "/" in filename or ".." in filename:
         return jsonify({"error": "filename inválido"}), 400
 
-    img_path = Path(row["zip_path"]).parent / "recursos" / filename
-    if not img_path.exists():
+    img_path = _resolve_course_resource(Path(row["zip_path"]).parent, filename)
+    if not img_path:
         return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
 
     alt = generate_alt_text(img_path)
@@ -4435,8 +4435,8 @@ def course_ai_copyright(token):
     filename = (payload.get("filename") or "").strip()
     if not filename or "/" in filename or ".." in filename:
         return jsonify({"error": "filename inválido"}), 400
-    img_path = Path(row["zip_path"]).parent / "recursos" / filename
-    if not img_path.exists():
+    img_path = _resolve_course_resource(Path(row["zip_path"]).parent, filename)
+    if not img_path:
         return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
     result = detect_copyright_risk(img_path)
     if not result:
