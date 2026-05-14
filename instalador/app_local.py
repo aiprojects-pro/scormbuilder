@@ -2087,7 +2087,7 @@ def course_edit(token):
         }};
       }}
 
-      // ----- v0.5.3: Botón alt-text para TODAS las imágenes -----
+      // ----- v0.5.4: Botón alt-text para TODAS las imágenes -----
       const altAllBtn = document.getElementById('ed-alt-text-all');
       if (altAllBtn) {{
         altAllBtn.onclick = async () => {{
@@ -4220,9 +4220,17 @@ def course_ai_alt_text_block(token):
     if not filename or "/" in filename or ".." in filename:
         return jsonify({"error": "filename inválido"}), 400
 
-    img_path = _resolve_course_resource(Path(row["zip_path"]).parent, filename)
-    if not img_path:
-        return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
+    # v0.5.3: en modo lote las imágenes viven en subcarpetas __topic_N__/.
+    # Primero buscamos en raíz (modo single); si no, recursivamente.
+    recursos_dir = Path(row["zip_path"]).parent / "recursos"
+    img_path = recursos_dir / filename
+    if not img_path.exists():
+        # Búsqueda recursiva en subcarpetas __topic_N__/
+        matches = list(recursos_dir.rglob(filename)) if recursos_dir.exists() else []
+        if matches:
+            img_path = matches[0]
+        else:
+            return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
 
     alt = generate_alt_text(img_path)
     if not alt:
@@ -4233,27 +4241,16 @@ def course_ai_alt_text_block(token):
 @app.route("/api/curso/<token>/ai-alt-text-all", methods=["POST"])
 @login_required
 def course_ai_alt_text_all(token):
-    """v0.5.3: Genera alt-text para TODAS las imágenes del curso que no tengan.
+    """v0.5.4: Genera alt-text para TODAS las imágenes del curso que no tengan.
 
     Recorre structure.json buscando bloques type=image sin "text" (alt-text)
     y llama a la IA por cada imagen. Salta las que ya tienen alt y las que
-    no apuntan a un archivo local.
+    apuntan a URLs externas.
 
     Crea snapshot previa.
 
-    Devuelve:
-      {
-        "ok": true,
-        "snapshot_id": "...",
-        "summary": {
-          "total_images": 46,
-          "already_with_alt": 0,
-          "generated": 46,
-          "failed": 0,
-          "skipped_external": 0
-        },
-        "errors": [...]
-      }
+    Devuelve summary con total_images, already_with_alt, generated, failed,
+    skipped_external + lista de errores.
     """
     from scorm_builder.ai_assist import is_available, generate_alt_text
     if not is_available():
@@ -4272,7 +4269,6 @@ def course_ai_alt_text_all(token):
     if not structure_path.exists():
         return jsonify({"error": "Curso sin estructura editable"}), 404
 
-    # Snapshot previa
     snap_id = _save_snapshot(job_dir, label="pre_alt_all")
 
     with open(structure_path, encoding="utf-8") as f:
@@ -4292,7 +4288,6 @@ def course_ai_alt_text_all(token):
                 if b.get("type") != "image":
                     continue
                 total_images += 1
-                # Si ya tiene alt-text no tocamos
                 if (b.get("text") or "").strip():
                     already_with_alt += 1
                     continue
@@ -4301,11 +4296,10 @@ def course_ai_alt_text_all(token):
                 if not src:
                     skipped_external += 1
                     continue
-                # Imagen externa (URL http/data) no se puede analizar localmente
                 if src.startswith(("http://", "https://", "data:")):
                     skipped_external += 1
                     continue
-                # Buscar archivo igual que en ai-alt-text-block: raíz, luego rglob
+                # Búsqueda igual que ai-alt-text-block: raíz, luego rglob
                 img_path = recursos_dir / src
                 if not img_path.exists():
                     matches = list(recursos_dir.rglob(src)) if recursos_dir.exists() else []
@@ -4322,13 +4316,10 @@ def course_ai_alt_text_all(token):
                     errors.append(f"Tema {ti+1} ({src}): excepción — {e}")
                 if not alt:
                     failed += 1
-                    if not any(src in m for m in errors[-3:]):
-                        errors.append(f"Tema {ti+1}: IA no devolvió alt para '{src}'")
                     continue
                 b["text"] = alt
                 generated += 1
 
-    # Persistir
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -4607,9 +4598,15 @@ def course_ai_copyright(token):
     filename = (payload.get("filename") or "").strip()
     if not filename or "/" in filename or ".." in filename:
         return jsonify({"error": "filename inválido"}), 400
-    img_path = _resolve_course_resource(Path(row["zip_path"]).parent, filename)
-    if not img_path:
-        return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
+    # v0.5.3: idéntica lógica que ai-alt-text-block
+    recursos_dir = Path(row["zip_path"]).parent / "recursos"
+    img_path = recursos_dir / filename
+    if not img_path.exists():
+        matches = list(recursos_dir.rglob(filename)) if recursos_dir.exists() else []
+        if matches:
+            img_path = matches[0]
+        else:
+            return jsonify({"error": f"No se encuentra '{filename}' en recursos/"}), 404
     result = detect_copyright_risk(img_path)
     if not result:
         return jsonify({"error": "La IA no pudo analizar la imagen"}), 502
@@ -4702,9 +4699,9 @@ def course_ai_enrich_all(token):
     details = []
     errors = []
 
-    # Configuración fija del quiz mixto que aplicamos cuando el tema lo necesita
+    # Configuración del quiz mixto: distribuye entre final + intercaladas por subapartado
     QUIZ_CFG = QuizConfig(
-        location="final",
+        location="mixed",  # v0.5.4: 'mixed' = bloque final + 1 pregunta por subapartado intercalada
         types=["multiple_choice", "true_false", "fill_in"],
         n_questions=5,
     )
