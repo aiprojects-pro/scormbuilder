@@ -5887,7 +5887,7 @@ def api_generar():
     total_resources = 0
     total_packages = 0
     course_titles: list[str] = []
-    last_course_data: Optional[dict] = None
+    editable_course_data: Optional[dict] = None
 
     for idx, docx_file in enumerate(docx_files):
         # Guardar el .docx subido
@@ -5944,7 +5944,13 @@ def api_generar():
         course_titles.append(r.course.metadata.title)
         course_dict = r.course.to_dict()
         course_dict["metadata"]["num_hours"] = num_hours
-        last_course_data = course_dict
+        if editable_course_data is None:
+            editable_course_data = json.loads(json.dumps(course_dict))
+        elif upload_mode == "batch":
+            for topic in course_dict.get("topics", []):
+                topic_copy = json.loads(json.dumps(topic))
+                topic_copy["number"] = len(editable_course_data.get("topics", [])) + 1
+                editable_course_data.setdefault("topics", []).append(topic_copy)
 
         # ----- SCORM 2004 (si se pide) -----
         if scorm_version in ("2004", "both"):
@@ -6059,6 +6065,20 @@ def api_generar():
         except Exception:
             pass
 
+    display_title = (
+        titulo_curso if upload_mode == "single"
+        else f"{titulo_curso} ({len(course_titles)} unidades)"
+    )
+    if editable_course_data:
+        try:
+            editable_course_data.setdefault("metadata", {})["title"] = display_title or "Sin título"
+            (job_dir / "structure.json").write_text(
+                json.dumps(editable_course_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     # ----- Empaquetar todo en un único ZIP descargable -----
     final_zip = job_dir / f"curso_{token}.zip"
     with zipfile.ZipFile(final_zip, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -6067,10 +6087,6 @@ def api_generar():
                 zf.write(path, arcname=str(path.relative_to(output_dir)))
 
     # ----- Persistir en BD -----
-    display_title = (
-        titulo_curso if upload_mode == "single"
-        else f"{titulo_curso} ({len(course_titles)} unidades)"
-    )
     with db() as conn:
         conn.execute(
             """INSERT INTO courses
