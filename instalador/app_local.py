@@ -4062,13 +4062,51 @@ def course_preview_html(token):
     # reescribir las rutas para que apunten a la carpeta de recursos del curso.
     htmls = render_html(course, theme)
     html_str = htmls.get(topic.number, "")
-    # Reescribir 'recursos/...' a la ruta servida por la app
-    serve_prefix = url_for("course_preview_resource", token=token, filename="").rstrip("/") + "/"
+    # Reescribir 'recursos/...' a la ruta servida por la app. En cursos en
+    # lote cada unidad tiene su propia carpeta recursos/, así que incluimos el
+    # número de tema para resolver nombres repetidos como docx_img_007.png.
+    serve_prefix = url_for(
+        "course_preview_resource",
+        token=token,
+        filename=f"__topic_{topic.number}__/",
+    ).rstrip("/") + "/"
     html_str = html_str.replace('src="recursos/', f'src="{serve_prefix}')
     html_str = html_str.replace('href="recursos/', f'href="{serve_prefix}')
 
     from flask import Response
     return Response(html_str, mimetype="text/html; charset=utf-8")
+
+
+def _resolve_course_resource(job_dir: Path, filename: str) -> Optional[Path]:
+    """Resuelve recursos tanto en cursos single como batch."""
+    requested = Path(filename)
+    if requested.is_absolute() or any(part == ".." for part in requested.parts):
+        return None
+
+    topic_match = re.match(r"^__topic_(\d+)__/(.+)$", filename)
+    if topic_match:
+        topic_number = int(topic_match.group(1))
+        inner = Path(topic_match.group(2))
+        if inner.is_absolute() or any(part == ".." for part in inner.parts):
+            return None
+        for unit_dir in sorted((job_dir / "salida").glob(f"unidad_{topic_number:02d}_*")):
+            candidate = unit_dir / "recursos" / inner
+            if candidate.is_file():
+                return candidate
+        return None
+
+    candidates = [
+        job_dir / "recursos" / requested,
+        job_dir / "salida" / "recursos" / requested,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    for candidate in sorted((job_dir / "salida").glob(f"**/recursos/{filename}")):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 @app.route("/curso/<token>/preview-resource/<path:filename>")
@@ -4084,13 +4122,14 @@ def course_preview_resource(token, filename):
         ).fetchone()
     if not row:
         abort(404)
-    resource = Path(row["zip_path"]).parent / "recursos" / filename
-    if not resource.exists() or not resource.is_file():
+    job_dir = Path(row["zip_path"]).parent
+    resource = _resolve_course_resource(job_dir, filename)
+    if not resource or not resource.exists() or not resource.is_file():
         abort(404)
-    # Sanity check: el resultado debe estar dentro de recursos/
+    # Sanity check: el resultado debe estar dentro del job del curso.
     try:
-        resource.resolve().relative_to((Path(row["zip_path"]).parent / "recursos").resolve())
-    except ValueError:
+        resource.resolve().relative_to(job_dir.resolve())
+    except (ValueError, AttributeError):
         abort(403)
     return send_file(str(resource), as_attachment=False)
 
@@ -4230,7 +4269,11 @@ def course_preview_html_snapshot(token, snapshot_id):
     topic = course.topics[topic_index]
     htmls = render_html(course, theme)
     html_str = htmls.get(topic.number, "")
-    serve_prefix = url_for("course_preview_resource", token=token, filename="").rstrip("/") + "/"
+    serve_prefix = url_for(
+        "course_preview_resource",
+        token=token,
+        filename=f"__topic_{topic.number}__/",
+    ).rstrip("/") + "/"
     html_str = html_str.replace('src="recursos/', f'src="{serve_prefix}')
     html_str = html_str.replace('href="recursos/', f'href="{serve_prefix}')
 
