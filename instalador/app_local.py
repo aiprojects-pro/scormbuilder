@@ -1944,6 +1944,7 @@ def course_edit(token):
       html += '<button type="button" class="btn secondary" onclick="restoreSnapshot()" title="Descartar cambios desde el último guardado">↺ Descartar cambios</button>';
       html += '<a class="btn secondary" href="/curso/' + TOKEN + '">Salir</a>';
       html += '<button type="button" class="btn-ai" id="ed-glossary">📖 Generar glosario del curso con IA</button>';
+      html += '<button type="button" class="btn-ai" id="ed-alt-text-all">🖼️ Generar alt-text para todas las imágenes</button>';
       html += '<button type="button" class="btn-ai" id="ed-tts">🔊 Generar narración TTS de todo el curso</button>';
       html += '<button type="button" class="btn secondary" id="ed-wcag-check">🔍 Validar WCAG 2.1 AA</button>';
       html += '<button type="button" class="btn secondary" id="ed-preview">👁 Vista previa del SCORM</button>';
@@ -2083,6 +2084,61 @@ def course_edit(token):
           course.topics.push(newTopic);
           render();
           markDirty(); setStatus('✓ Glosario con ' + items.length + ' términos añadido como tema final. Revísalo y guarda.');
+        }};
+      }}
+
+      // ----- v0.5.3: Botón alt-text para TODAS las imágenes -----
+      const altAllBtn = document.getElementById('ed-alt-text-all');
+      if (altAllBtn) {{
+        altAllBtn.onclick = async () => {{
+          collectChanges();
+          if (dirty) {{
+            const r = await fetch(API_SAVE, {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(course)
+            }});
+            if (!r.ok) {{ alert('Guarda los cambios manualmente primero.'); return; }}
+            dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
+          }}
+          if (!confirm('La IA generará alt-text descriptivo para TODAS las imágenes del curso que aún no lo tengan.\\n\\nPuede tardar 5-15 segundos por imagen.\\nSe creará una snapshot previa por si quieres revertir.\\n\\n¿Continuar?')) return;
+
+          const orig = altAllBtn.textContent;
+          altAllBtn.disabled = true;
+          altAllBtn.textContent = '⏳ Procesando imágenes... (no cierres la pestaña)';
+          try {{
+            const r = await fetch('/api/curso/' + TOKEN + '/ai-alt-text-all', {{method: 'POST'}});
+            const data = await r.json();
+            if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
+            const s = data.summary || {{}};
+
+            // Recargar estructura
+            const r2 = await fetch(API_GET);
+            if (r2.ok) {{
+              course = await r2.json();
+              courseSnapshot = JSON.parse(JSON.stringify(course));
+              dirty = false;
+              render();
+            }}
+
+            let msg = '✓ Alt-text generado:\\n\\n';
+            msg += '  • ' + (s.total_images || 0) + ' imágenes encontradas\\n';
+            msg += '  • ' + (s.generated || 0) + ' alt-text generados\\n';
+            if (s.already_with_alt) msg += '  • ' + s.already_with_alt + ' ya tenían alt (saltadas)\\n';
+            if (s.skipped_external) msg += '  • ' + s.skipped_external + ' imágenes externas (URLs)\\n';
+            if (s.failed) msg += '  • ⚠ ' + s.failed + ' fallaron\\n';
+            if (data.errors && data.errors.length) {{
+              msg += '\\nErrores (primeros): ' + data.errors.slice(0,3).join(', ');
+            }}
+            msg += '\\n\\nSnapshot previa: ' + (data.snapshot_id || '—');
+            alert(msg);
+            setStatus('✓ ' + (s.generated || 0) + ' alt-text generados. Pulsa "💾 Guardar y reempaquetar" para incluirlos en el SCORM final.');
+          }} catch (e) {{
+            alert('Error: ' + e.message);
+          }} finally {{
+            altAllBtn.disabled = false;
+            altAllBtn.textContent = orig;
+          }}
         }};
       }}
 
@@ -4172,6 +4228,122 @@ def course_ai_alt_text_block(token):
     if not alt:
         return jsonify({"error": "La IA no pudo generar alt-text"}), 502
     return jsonify({"alt": alt})
+
+
+@app.route("/api/curso/<token>/ai-alt-text-all", methods=["POST"])
+@login_required
+def course_ai_alt_text_all(token):
+    """v0.5.3: Genera alt-text para TODAS las imágenes del curso que no tengan.
+
+    Recorre structure.json buscando bloques type=image sin "text" (alt-text)
+    y llama a la IA por cada imagen. Salta las que ya tienen alt y las que
+    no apuntan a un archivo local.
+
+    Crea snapshot previa.
+
+    Devuelve:
+      {
+        "ok": true,
+        "snapshot_id": "...",
+        "summary": {
+          "total_images": 46,
+          "already_with_alt": 0,
+          "generated": 46,
+          "failed": 0,
+          "skipped_external": 0
+        },
+        "errors": [...]
+      }
+    """
+    from scorm_builder.ai_assist import is_available, generate_alt_text
+    if not is_available():
+        return jsonify({"error": "ANTHROPIC_API_KEY no configurada en el entorno"}), 400
+
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+    if not row:
+        abort(404)
+    job_dir = Path(row["zip_path"]).parent
+    structure_path = job_dir / "structure.json"
+    if not structure_path.exists():
+        return jsonify({"error": "Curso sin estructura editable"}), 404
+
+    # Snapshot previa
+    snap_id = _save_snapshot(job_dir, label="pre_alt_all")
+
+    with open(structure_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    recursos_dir = job_dir / "recursos"
+    total_images = 0
+    already_with_alt = 0
+    generated = 0
+    failed = 0
+    skipped_external = 0
+    errors: List[str] = []
+
+    for ti, topic in enumerate(data.get("topics", [])):
+        for sub in topic.get("subsections", []):
+            for b in sub.get("blocks", []):
+                if b.get("type") != "image":
+                    continue
+                total_images += 1
+                # Si ya tiene alt-text no tocamos
+                if (b.get("text") or "").strip():
+                    already_with_alt += 1
+                    continue
+                extras = b.get("extras") or {}
+                src = (extras.get("src") or "").strip()
+                if not src:
+                    skipped_external += 1
+                    continue
+                # Imagen externa (URL http/data) no se puede analizar localmente
+                if src.startswith(("http://", "https://", "data:")):
+                    skipped_external += 1
+                    continue
+                # Buscar archivo igual que en ai-alt-text-block: raíz, luego rglob
+                img_path = recursos_dir / src
+                if not img_path.exists():
+                    matches = list(recursos_dir.rglob(src)) if recursos_dir.exists() else []
+                    if matches:
+                        img_path = matches[0]
+                    else:
+                        failed += 1
+                        errors.append(f"Tema {ti+1}: no se encuentra '{src}'")
+                        continue
+                try:
+                    alt = generate_alt_text(img_path)
+                except Exception as e:
+                    alt = None
+                    errors.append(f"Tema {ti+1} ({src}): excepción — {e}")
+                if not alt:
+                    failed += 1
+                    if not any(src in m for m in errors[-3:]):
+                        errors.append(f"Tema {ti+1}: IA no devolvió alt para '{src}'")
+                    continue
+                b["text"] = alt
+                generated += 1
+
+    # Persistir
+    with open(structure_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return jsonify({
+        "ok": True,
+        "snapshot_id": snap_id,
+        "summary": {
+            "total_images": total_images,
+            "already_with_alt": already_with_alt,
+            "generated": generated,
+            "failed": failed,
+            "skipped_external": skipped_external,
+        },
+        "errors": errors[:30],
+    })
 
 
 # ============================================================
