@@ -6048,9 +6048,14 @@ def api_generar():
 
         # Persistir estructura del último curso (para edición posterior)
         try:
+            structure_json = json.dumps(course_dict, ensure_ascii=False, indent=2)
             (job_dir / f"structure_{idx+1}.json").write_text(
-                json.dumps(course_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+                structure_json, encoding="utf-8"
             )
+            if upload_mode == "single" and idx == 0:
+                (job_dir / "structure.json").write_text(
+                    structure_json, encoding="utf-8"
+                )
         except Exception:
             pass
 
