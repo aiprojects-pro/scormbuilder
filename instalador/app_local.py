@@ -360,7 +360,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.7</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.8</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -3200,7 +3200,12 @@ def course_edit(token):
         dirty = false;
         courseSnapshot = JSON.parse(JSON.stringify(course));
         document.querySelectorAll('.ed-dirty-indicator').forEach(ind => ind.style.display = 'none');
-        setStatus('✓ Guardado correctamente. SCORM reempaquetado.');
+        // v0.5.8: si el servidor reparó bloques automáticamente, avisar al usuario
+        if (data.auto_repaired && data.auto_repaired > 0) {{
+          setStatus('✓ Guardado. ' + data.auto_repaired + ' bloques vacíos reparados automáticamente.');
+        }} else {{
+          setStatus('✓ Guardado correctamente. SCORM reempaquetado.');
+        }}
         saveBtns.forEach(b => b.disabled = false);
       }} catch (e) {{
         setStatus('Error: ' + e.message);
@@ -3256,8 +3261,20 @@ def course_edit(token):
     .ed-expl {{ display: block; margin-top: 0.5rem; font-size: 0.78rem; color: var(--ink-mute); font-weight: 600; }}
     .ed-expl input {{ margin-top: 0.3rem; }}
     .ed-readonly {{ color: var(--ink-mute); font-size: 0.85rem; }}
-    .ed-actions {{ display: flex; gap: 0.6rem; align-items: center; margin: 1.5rem 0 3rem; }}
+    .ed-actions {{
+      display: flex;
+      flex-wrap: wrap;          /* v0.5.8: permite que los botones bajen a una segunda línea */
+      gap: 0.6rem;
+      align-items: center;
+      margin: 1.5rem 0 3rem;
+      row-gap: 0.7rem;
+    }}
     .ed-actions .btn {{ width: auto; }}
+    .ed-actions .btn,
+    .ed-actions .btn-ai {{
+      white-space: normal;       /* permite saltos de línea dentro del botón */
+      max-width: 220px;          /* evita botones gigantes en pantallas anchas */
+    }}
     .ed-quiz h3 {{ display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }}
     .ed-quiz-empty {{ background: var(--paper-warm); border-radius: 6px; padding: 1rem 1.2rem; }}
     .btn-ai {{
@@ -3933,7 +3950,10 @@ def course_structure_save(token):
 
     # Validación estructural mínima: detectar cursos vacíos o degenerados
     # antes de aceptar el guardado.
+    # v0.5.8: además, AUTO-REPARAR listas vacías (descarta el bloque o lo
+    # convierte a párrafo en lugar de rechazar el guardado).
     validation_errors = []
+    auto_repaired = 0  # contador de bloques reparados silenciosamente
     topics = payload.get("topics", [])
     if not isinstance(topics, list) or not topics:
         validation_errors.append(
@@ -3964,15 +3984,47 @@ def course_structure_save(token):
                         f"({(s.get('title') or '?').strip() or '?'}): "
                         "debe tener al menos un bloque de contenido"
                     )
-                # Validar listas no vacías
-                for bi, b in enumerate(blocks):
-                    if isinstance(b, dict) and b.get("type") in ("list_bullet", "list_number"):
-                        items = b.get("items") or []
-                        if not items or not any((str(it).strip()) for it in items):
-                            validation_errors.append(
-                                f"Tema {ti+1} > subapartado {si+1}, bloque {bi+1}: "
-                                "lista vacía (debe tener al menos un item)"
-                            )
+                # v0.5.8: AUTO-REPARAR listas vacías en lugar de rechazar.
+                # Una lista sin items es una construcción inválida del DOCX
+                # (a veces el parser detecta como lista lo que era un párrafo
+                # con bullet pero sin contenido). Reparamos en silencio:
+                #   - Si la lista tiene "text" con contenido → convertir a párrafo
+                #   - Si no tiene nada útil → eliminar el bloque
+                # Esto se hace en el payload antes de seguir.
+                if isinstance(blocks, list):
+                    repaired_blocks = []
+                    for b in blocks:
+                        if not isinstance(b, dict):
+                            repaired_blocks.append(b)
+                            continue
+                        if b.get("type") in ("list_bullet", "list_number"):
+                            items = b.get("items") or []
+                            has_items = any((str(it).strip()) for it in items)
+                            if not has_items:
+                                # Reparar: si tiene text, convertir a párrafo;
+                                # si no, descartar el bloque.
+                                txt = (b.get("text") or "").strip()
+                                if txt:
+                                    b = {**b, "type": "paragraph", "items": []}
+                                    repaired_blocks.append(b)
+                                    auto_repaired += 1
+                                else:
+                                    auto_repaired += 1
+                                    continue  # descartar
+                            else:
+                                repaired_blocks.append(b)
+                        else:
+                            repaired_blocks.append(b)
+                    s["blocks"] = repaired_blocks
+                    # Tras reparar, si el subapartado se quedó sin bloques,
+                    # añadir un párrafo vacío para no romper la siguiente
+                    # validación. (Sí es un caso raro pero lo gestionamos.)
+                    if not s["blocks"]:
+                        s["blocks"] = [{
+                            "type": "paragraph", "text": "",
+                            "items": [], "rows": [], "extras": {},
+                        }]
+                        auto_repaired += 1
 
     if validation_errors:
         return jsonify({
@@ -4040,7 +4092,7 @@ def course_structure_save(token):
         )
         conn.commit()
 
-    return jsonify({"ok": True, "token": token})
+    return jsonify({"ok": True, "token": token, "auto_repaired": auto_repaired})
 
 
 @app.route("/api/curso/<token>/ai-quiz", methods=["POST"])
