@@ -133,6 +133,12 @@ class CourseMetadata:
     weight_quiz: int = 60        # peso del quiz (0-100)
     view_min_seconds: int = 10   # tiempo mínimo por subapartado para contar como visto
     view_strategy: str = "both"  # "scroll", "time", "both"
+    # v0.5.7: colores custom de la paleta (si el usuario los personalizó al generar).
+    # Si están los 3, se usan en lugar de la paleta predefinida 'palette'.
+    # Si están vacíos, se usa la paleta predefinida por nombre.
+    color_deep: str = ""         # cabecera (oscuro)
+    color_primary: str = ""      # color primario
+    color_bright: str = ""       # color brillante (acentos)
 
 
 @dataclass

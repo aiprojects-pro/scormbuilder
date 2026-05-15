@@ -362,8 +362,18 @@ def rebuild_from_structure(
     _normalize_weights(course)
 
     # Resolver tema
+    # Prioridad: 1) custom_palette explícito  2) colores custom guardados en metadata
+    #            3) paleta predefinida por nombre en metadata  4) theme por defecto
     if custom_palette:
         theme_obj = make_custom_theme(**custom_palette)
+    elif (course.metadata.color_deep and course.metadata.color_primary
+          and course.metadata.color_bright):
+        # v0.5.7: usar colores custom guardados en el curso
+        theme_obj = make_custom_theme(
+            primary_deep=course.metadata.color_deep,
+            primary=course.metadata.color_primary,
+            primary_bright=course.metadata.color_bright,
+        )
     elif isinstance(theme, Theme):
         theme_obj = theme
     else:
@@ -427,6 +437,9 @@ def course_from_dict(data: dict) -> CourseStructure:
         weight_quiz=int(md_data.get("weight_quiz", 60)),
         view_min_seconds=int(md_data.get("view_min_seconds", 10)),
         view_strategy=md_data.get("view_strategy", "both"),
+        color_deep=md_data.get("color_deep", ""),
+        color_primary=md_data.get("color_primary", ""),
+        color_bright=md_data.get("color_bright", ""),
     )
     course = CourseStructure(metadata=metadata)
     for t_data in data.get("topics", []):

@@ -360,7 +360,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.6</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.7</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -1841,10 +1841,12 @@ def course_edit(token):
       return h;
     }}
 
-    // Helper: vincula un handler a todos los botones que tengan una clase de acción
+    // Helper: vincula un handler a todos los botones que tengan una clase de acción.
+    // El handler recibe (event.currentTarget) como argumento, así puede usar
+    // el botón clickeado para feedback (disable/enable, cambio de texto, etc.).
     function bindAct(actionName, handler) {{
       document.querySelectorAll('.ed-act-' + actionName).forEach(btn => {{
-        btn.onclick = handler;
+        btn.onclick = (e) => handler(e.currentTarget);
       }});
     }}
 
@@ -1854,6 +1856,34 @@ def course_edit(token):
       bindAct('discard', restoreSnapshot);
       // El resto de handlers se enganchan más abajo (después del render())
       // mediante bindAct() llamado desde cada bloque correspondiente.
+    }}
+
+    // Helper: marca botón ocupado y llama a un endpoint, luego restaura
+    async function callAI(btn, url, payload) {{
+      const orig = btn ? btn.textContent : '';
+      if (btn) {{ btn.disabled = true; btn.textContent = '⏳ ...'; }}
+      try {{
+        const r = await fetch(url, {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(payload)
+        }});
+        const data = await r.json();
+        if (!r.ok) {{
+          alert('Error IA: ' + (data.error || 'desconocido'));
+          return null;
+        }}
+        return data;
+      }} catch (e) {{
+        alert('Error: ' + e.message);
+        return null;
+      }} finally {{
+        if (btn) {{ btn.disabled = false; btn.textContent = orig; }}
+      }}
+    }}
+
+    function setStatus(msg) {{
+      document.querySelectorAll('.ed-status').forEach(s => s.textContent = msg);
     }}
 
     function render() {{
@@ -2052,36 +2082,6 @@ def course_edit(token):
       // Bind de los botones (top y bottom comparten las mismas clases data-action)
       bindAllActions();
 
-      // Helper: marca botón ocupado y llama a un endpoint, luego restaura
-      async function callAI(btn, url, payload) {{
-        const orig = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = '⏳ ...';
-        try {{
-          const r = await fetch(url, {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify(payload)
-          }});
-          const data = await r.json();
-          if (!r.ok) {{
-            alert('Error IA: ' + (data.error || 'desconocido'));
-            return null;
-          }}
-          return data;
-        }} catch (e) {{
-          alert('Error: ' + e.message);
-          return null;
-        }} finally {{
-          btn.disabled = false;
-          btn.textContent = orig;
-        }}
-      }}
-
-      function setStatus(msg) {{
-        document.querySelectorAll('.ed-status').forEach(s => s.textContent = msg);
-      }}
-
       // ----- Botones de quiz (generar / añadir) -----
       document.querySelectorAll('.btn-ai[data-mode], .btn-ai-mini[data-mode]').forEach(btn => {{
         btn.onclick = async () => {{
@@ -2149,9 +2149,9 @@ def course_edit(token):
       }});
 
       // ----- Botón glosario del curso -----
-      bindAct('glossary', async () => {{
+      bindAct('glossary', async (btn) => {{
           collectChanges();
-          const data = await callAI(gloBtn, '/api/curso/' + TOKEN + '/ai-glossary', {{}});
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-glossary', {{}});
           if (!data) return;
           const items = data.glossary || [];
           if (!items.length) {{ alert('La IA no devolvió términos.'); return; }}
@@ -2177,7 +2177,7 @@ def course_edit(token):
           markDirty(); setStatus('✓ Glosario con ' + items.length + ' términos añadido como tema final. Revísalo y guarda.');
         }});
       // ----- v0.5.4: Botón alt-text para TODAS las imágenes -----
-      bindAct('alt-text-all', async () => {{
+      bindAct('alt-text-all', async (btn) => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -2226,14 +2226,14 @@ def course_edit(token):
           }}
         }});
       // ----- Botón TTS del curso -----
-      bindAct('tts', async () => {{
+      bindAct('tts', async (btn) => {{
           if (!confirm('Esto generará un archivo de audio por cada subapartado del curso. Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
           // El backend modifica directamente structure.json y devuelve métricas.
           // Tras la llamada, recargamos la estructura para reflejar los nuevos bloques [AUDIO].
-          ttsBtn.disabled = true;
-          const orig = ttsBtn.textContent;
-          ttsBtn.textContent = '⏳ Generando audios… (puede tardar)';
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = '⏳ Generando audios… (puede tardar)';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/tts', {{
               method: 'POST',
@@ -2253,8 +2253,8 @@ def course_edit(token):
           }} catch (e) {{
             alert('Error: ' + e.message);
           }} finally {{
-            ttsBtn.disabled = false;
-            ttsBtn.textContent = orig;
+            btn.disabled = false;
+            btn.textContent = orig;
           }}
         }});
       // ============================================================
@@ -2345,23 +2345,23 @@ def course_edit(token):
       }});
 
       // ----- BANCO AIKEN EXTENDIDO -----
-      bindAct('aiken-ext', async () => {{
+      bindAct('aiken-ext', async (btn) => {{
           if (!confirm('Esto pedirá a la IA 30 preguntas adicionales por cada tema (banco para evaluación externa). Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
-          const data = await callAI(aikenBtn, '/api/curso/' + TOKEN + '/ai-aiken-extendido', {{n: 30}});
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-aiken-extendido', {{n: 30}});
           if (!data) return;
           const list = (data.files || []).map(f => '• ' + f).join('\\n');
           alert('✓ Banco Aiken extendido generado:\\n\\n' + list + '\\n\\nLos archivos están en la carpeta del curso (aiken_extendido/). Cuando guardes el curso se incluirán en el ZIP descargable.');
           setStatus('✓ ' + (data.files || []).length + ' bancos Aiken extendidos generados.');
         }});
       // ----- EXPORT IMS CONTENT PACKAGE -----
-      bindAct('export-imscp', async () => {{
+      bindAct('export-imscp', async (btn) => {{
           if (dirty) {{
             if (!confirm('Hay cambios sin guardar. El IMS CP se generará con la última versión guardada. ¿Continuar?')) return;
           }}
-          imsBtn.disabled = true;
-          const orig = imsBtn.textContent;
-          imsBtn.textContent = '⏳ Empaquetando…';
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = '⏳ Empaquetando…';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/export-imscp', {{
               method: 'POST',
@@ -2374,8 +2374,8 @@ def course_edit(token):
           }} catch (e) {{
             alert('Error: ' + e.message);
           }} finally {{
-            imsBtn.disabled = false;
-            imsBtn.textContent = orig;
+            btn.disabled = false;
+            btn.textContent = orig;
           }}
         }});
       // ============================================================
@@ -2413,7 +2413,7 @@ def course_edit(token):
       }});
 
       // ----- BOTÓN "Validar WCAG 2.1 AA" -----
-      bindAct('wcag-check', async () => {{
+      bindAct('wcag-check', async (btn) => {{
           collectChanges();
           // Guardar primero (silenciosamente) para que el validador lea estructura actualizada
           if (dirty) {{
@@ -2429,15 +2429,15 @@ def course_edit(token):
             }}
             dirty = false; courseSnapshot = JSON.parse(JSON.stringify(course));
           }}
-          const orig = wcagBtn.textContent;
-          wcagBtn.disabled = true; wcagBtn.textContent = '⏳ Validando…';
+          const orig = btn.textContent;
+          btn.disabled = true; btn.textContent = '⏳ Validando…';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/wcag-check', {{method: 'POST'}});
             const report = await r.json();
             if (!r.ok) {{ alert('Error: ' + (report.error || 'desconocido')); return; }}
             showWcagModal(report);
           }} finally {{
-            wcagBtn.disabled = false; wcagBtn.textContent = orig;
+            btn.disabled = false; btn.textContent = orig;
           }}
         }});
       function showWcagModal(report) {{
@@ -2476,7 +2476,7 @@ def course_edit(token):
       }}
 
       // ----- BOTÓN "Vista previa del SCORM" -----
-      bindAct('preview', async () => {{
+      bindAct('preview', async (btn) => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -2819,23 +2819,23 @@ def course_edit(token):
       }}
 
       // ----- CMI5 EXPORT -----
-      bindAct('export-cmi5', async () => {{
+      bindAct('export-cmi5', async (btn) => {{
           if (dirty) {{
             if (!confirm('Hay cambios sin guardar. El paquete cmi5 se generará con la última versión guardada. ¿Continuar?')) return;
           }}
-          const orig = cmi5Btn.textContent;
-          cmi5Btn.disabled = true; cmi5Btn.textContent = '⏳ Empaquetando…';
+          const orig = btn.textContent;
+          btn.disabled = true; btn.textContent = '⏳ Empaquetando…';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/export-cmi5', {{method: 'POST'}});
             const data = await r.json();
             if (!r.ok) {{ alert('Error: ' + (data.error || 'desconocido')); return; }}
             window.location.href = '/curso/' + TOKEN + '/export/cmi5';
           }} finally {{
-            cmi5Btn.disabled = false; cmi5Btn.textContent = orig;
+            btn.disabled = false; btn.textContent = orig;
           }}
         }});
       // ----- APLICAR MEJORAS IA AL CURSO COMPLETO (v0.5.1) -----
-      bindAct('enrich-all', async () => {{
+      bindAct('enrich-all', async (btn) => {{
           collectChanges();
           if (dirty) {{
             const r = await fetch(API_SAVE, {{
@@ -4369,10 +4369,19 @@ def course_preview_html(token):
 
     from scorm_builder.api import course_from_dict
     from scorm_builder.renderer import render_html
-    from scorm_builder.themes import get_theme
+    from scorm_builder.themes import get_theme, make_custom_theme
 
     course = course_from_dict(data)
-    theme = get_theme(course.metadata.palette)
+    # v0.5.7: usar colores custom guardados en metadata si los hay
+    if (course.metadata.color_deep and course.metadata.color_primary
+            and course.metadata.color_bright):
+        theme = make_custom_theme(
+            primary_deep=course.metadata.color_deep,
+            primary=course.metadata.color_primary,
+            primary_bright=course.metadata.color_bright,
+        )
+    else:
+        theme = get_theme(course.metadata.palette)
     if not course.topics or topic_index < 0 or topic_index >= len(course.topics):
         return "<p>Tema fuera de rango.</p>", 404
     topic = course.topics[topic_index]
@@ -4394,8 +4403,56 @@ def course_preview_html(token):
     html_str = html_str.replace('src="recursos/', f'src="{serve_prefix}')
     html_str = html_str.replace('href="recursos/', f'href="{serve_prefix}')
 
+    # v0.5.7: inyectar filtro CSS aproximado para retintar las imágenes
+    # del DOCX (tablas, cajas azules embebidas) hacia el color de la paleta.
+    # Definimos el helper localmente para que este archivo sea standalone
+    # (sin depender de cambios en la librería renderer).
+    img_filter_css = _image_tint_css_local(theme)
+    if img_filter_css:
+        html_str = html_str.replace("</head>", f"<style>{img_filter_css}</style></head>", 1)
+
     from flask import Response
     return Response(html_str, mimetype="text/html; charset=utf-8")
+
+
+def _image_tint_css_local(theme) -> str:
+    """v0.5.7 (app_local standalone): filtro CSS aproximado para retintar
+    imágenes embebidas del DOCX hacia el color del tema. Réplica local del
+    helper en scorm_builder.renderer._image_tint_css; se mantiene aquí para
+    que app_local.py pueda desplegarse sin tocar la librería.
+
+    Imágenes con class 'no-tint' o data-no-tint no se retintan.
+    """
+    primary = (getattr(theme, "primary", "") or "").lstrip("#")
+    if len(primary) != 6:
+        return ""
+    try:
+        r = int(primary[0:2], 16) / 255.0
+        g = int(primary[2:4], 16) / 255.0
+        b = int(primary[4:6], 16) / 255.0
+    except ValueError:
+        return ""
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx == mn:
+        return ""
+    if mx == r:
+        h = ((g - b) / (mx - mn)) % 6
+    elif mx == g:
+        h = (b - r) / (mx - mn) + 2
+    else:
+        h = (r - g) / (mx - mn) + 4
+    h_deg = round(h * 60)
+    rotate = (h_deg - 220) % 360
+    if rotate > 180:
+        rotate -= 360
+    if abs(rotate) < 12:
+        return ""
+    return (
+        "/* v0.5.7: retintado aproximado de imágenes embebidas del DOCX. */"
+        ".topic-body img:not(.no-tint):not([data-no-tint]),"
+        ".module-content img:not(.no-tint):not([data-no-tint]),"
+        f"main img:not(.no-tint):not([data-no-tint]) {{ filter: hue-rotate({rotate}deg); }}"
+    )
 
 
 def _resolve_course_resource(job_dir: Path, filename: str) -> Optional[Path]:
@@ -6516,6 +6573,13 @@ def api_generar():
         course_titles.append(r.course.metadata.title)
         course_dict = r.course.to_dict()
         course_dict["metadata"]["num_hours"] = num_hours
+        # v0.5.7: persistir nombre de paleta y colores custom para que al
+        # reempaquetar tras editar se mantengan los colores elegidos
+        course_dict["metadata"]["palette"] = paleta
+        if custom_palette:
+            course_dict["metadata"]["color_deep"] = custom_palette["primary_deep"]
+            course_dict["metadata"]["color_primary"] = custom_palette["primary"]
+            course_dict["metadata"]["color_bright"] = custom_palette["primary_bright"]
         if editable_course_data is None:
             editable_course_data = json.loads(json.dumps(course_dict))
         elif upload_mode == "batch":

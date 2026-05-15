@@ -25,10 +25,57 @@ from scorm_builder.themes import Theme, theme_to_css_vars
 # CSS COMPLETO DEL CURSO
 # ============================================================
 
+def _image_tint_css(theme: Theme) -> str:
+    """v0.5.7: filtro CSS aproximado para retintar las imágenes embebidas
+    del DOCX (cajas azules, tablas con color) hacia el color de la paleta.
+
+    El docx típico usa azul ~hue 220. Calculamos el delta entre ese hue base
+    y el del color primary del tema, y aplicamos hue-rotate.
+
+    Las imágenes con class 'no-tint' o atributo data-no-tint quedan sin tocar
+    (fotografías, ilustraciones reales que no deben cambiar).
+    """
+    primary = (theme.primary or "").lstrip("#")
+    if len(primary) != 6:
+        return ""
+    try:
+        r = int(primary[0:2], 16) / 255.0
+        g = int(primary[2:4], 16) / 255.0
+        b = int(primary[4:6], 16) / 255.0
+    except ValueError:
+        return ""
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx == mn:
+        return ""  # gris puro: sin filtro
+    if mx == r:
+        h = ((g - b) / (mx - mn)) % 6
+    elif mx == g:
+        h = (b - r) / (mx - mn) + 2
+    else:
+        h = (r - g) / (mx - mn) + 4
+    h_deg = round(h * 60)
+    base_blue_hue = 220
+    rotate = (h_deg - base_blue_hue) % 360
+    if rotate > 180:
+        rotate -= 360
+    if abs(rotate) < 12:
+        return ""
+    return f"""
+/* v0.5.7: retintado aproximado de imágenes embebidas del DOCX hacia la paleta.
+   Para evitarlo en una imagen concreta: añade class="no-tint" o data-no-tint. */
+.topic-body img:not(.no-tint):not([data-no-tint]),
+.module-content img:not(.no-tint):not([data-no-tint]),
+main img:not(.no-tint):not([data-no-tint]) {{
+  filter: hue-rotate({rotate}deg);
+}}
+"""
+
+
 def get_full_css(theme: Theme) -> str:
     """Devuelve el CSS completo del curso con la paleta aplicada."""
     css_vars = theme_to_css_vars(theme)
-    return css_vars + """
+    img_tint = _image_tint_css(theme)
+    return css_vars + img_tint + """
 
 /* === IMPORT FUENTES === */
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700;9..144,900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
