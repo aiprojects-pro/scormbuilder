@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import smtplib
 import sqlite3
 import threading
 from typing import Optional, List
@@ -25,6 +26,7 @@ import uuid
 import webbrowser
 import zipfile
 from datetime import datetime
+from email.message import EmailMessage
 from functools import wraps
 from html import escape as html_escape
 from pathlib import Path
@@ -116,6 +118,34 @@ def init_db():
             warnings_json TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        -- v0.5.12: tabla de cursos compartidos entre usuarios
+        CREATE TABLE IF NOT EXISTS course_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            owner_id INTEGER NOT NULL,
+            shared_with_user_id INTEGER NOT NULL,
+            permission TEXT NOT NULL DEFAULT 'view',  -- 'view' o 'edit'
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE,
+            FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(shared_with_user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(course_id, shared_with_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shares_user ON course_shares(shared_with_user_id);
+        CREATE INDEX IF NOT EXISTS idx_shares_course ON course_shares(course_id);
+        -- v0.5.15: configuración de Moodle por curso (para upload directo)
+        CREATE TABLE IF NOT EXISTS moodle_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL UNIQUE,
+            moodle_url TEXT NOT NULL,
+            moodle_token TEXT NOT NULL,
+            moodle_courseid INTEGER NOT NULL,
+            moodle_section INTEGER DEFAULT 0,
+            last_upload_at TEXT,
+            last_upload_result TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
         );
         """)
 
@@ -360,7 +390,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.10</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.16</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -1833,6 +1863,79 @@ LIBRARY_EXTRA_CSS = """
   font-weight: 600;
   border: 1px solid #ddd6fe;
 }
+
+/* v0.5.12: secciones y compartición */
+.library-section-title {
+  font-size: 1.15rem;
+  color: var(--ink);
+  margin: 1.5rem 0 0.8rem;
+  font-weight: 700;
+}
+.library-section-title:first-child { margin-top: 0; }
+.course-card.shared-in {
+  border-left: 4px solid #6366f1;
+}
+.share-banner {
+  font-size: 0.78rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  background: #eef2ff;
+  color: #4338ca;
+  margin-bottom: 0.5rem;
+}
+.share-dialog-bg {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.share-dialog {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+}
+.share-dialog h3 { margin: 0 0 0.5rem; color: var(--ink); }
+.share-dialog-title {
+  font-size: 0.95rem; color: var(--ink-mute);
+  margin: 0 0 1rem; font-style: italic;
+}
+.share-dialog-current {
+  background: #f9fafb;
+  padding: 0.7rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  border: 1px solid var(--paper-deep);
+}
+.share-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+}
+.share-dialog-form { display: flex; flex-direction: column; gap: 0.5rem; }
+.share-dialog-form label { font-weight: 600; font-size: 0.85rem; }
+.share-dialog-form input, .share-dialog-form select {
+  padding: 0.55rem 0.7rem; border: 1px solid var(--paper-deep);
+  border-radius: 6px; font-size: 0.95rem;
+}
+.btn-link-danger {
+  background: none; border: none; color: #dc2626;
+  cursor: pointer; font-size: 0.8rem; text-decoration: underline;
+}
+.share-err {
+  background: #fee2e2; color: #b91c1c;
+  padding: 0.55rem 0.7rem; border-radius: 6px;
+  font-size: 0.85rem; margin-top: 0.5rem;
+}
+.share-ok {
+  background: #d1fae5; color: #065f46;
+  padding: 0.55rem 0.7rem; border-radius: 6px;
+  font-size: 0.85rem; margin-top: 0.5rem;
+}
 """
 
 
@@ -1891,16 +1994,779 @@ def _detect_ai_features(job_dir: Path) -> list[str]:
     return badges
 
 
+# ============================================================
+# v0.5.14: Sistema de notificaciones por email (SMTP)
+# ============================================================
+# Configurable mediante variables de entorno. Si no hay configuración,
+# las notificaciones se omiten silenciosamente (no rompen el flujo).
+#
+# Variables de entorno reconocidas:
+#   SCORM_SMTP_HOST     servidor SMTP (ej: smtp.gmail.com)
+#   SCORM_SMTP_PORT     puerto (587 STARTTLS / 465 SSL / 25 plano). Default 587.
+#   SCORM_SMTP_USER     usuario (normalmente el email de envío)
+#   SCORM_SMTP_PASS     contraseña o app-password
+#   SCORM_SMTP_FROM     email "From:" (si no se da, usa SMTP_USER)
+#   SCORM_SMTP_TLS      "1" para STARTTLS (default), "ssl" para SSL directo
+#   SCORM_PUBLIC_URL    URL pública base (ej: https://scormbuilder.aiprojects.pro)
+#                       — se usa para construir enlaces en los emails
+
+def _smtp_configured() -> bool:
+    """True si hay configuración suficiente para enviar email."""
+    return bool(os.environ.get("SCORM_SMTP_HOST") and os.environ.get("SCORM_SMTP_USER"))
+
+
+def _send_email_async(to_email: str, subject: str, body_text: str,
+                       body_html: Optional[str] = None) -> None:
+    """Envía un email en un thread (no bloquea la request).
+    
+    Si no hay configuración SMTP o falla el envío, lo registra en log pero no
+    propaga error. Las comparticiones se completan igual.
+    """
+    def _worker():
+        try:
+            if not _smtp_configured():
+                app.logger.info(f"SMTP no configurado, omito notificación a {to_email}")
+                return
+            host = os.environ.get("SCORM_SMTP_HOST", "")
+            port = int(os.environ.get("SCORM_SMTP_PORT", "587"))
+            user = os.environ.get("SCORM_SMTP_USER", "")
+            pwd = os.environ.get("SCORM_SMTP_PASS", "")
+            sender = os.environ.get("SCORM_SMTP_FROM") or user
+            tls_mode = os.environ.get("SCORM_SMTP_TLS", "1").lower()
+
+            msg = EmailMessage()
+            msg["From"] = sender
+            msg["To"] = to_email
+            msg["Subject"] = subject
+            msg.set_content(body_text)
+            if body_html:
+                msg.add_alternative(body_html, subtype="html")
+
+            if tls_mode == "ssl":
+                with smtplib.SMTP_SSL(host, port, timeout=15) as srv:
+                    if user and pwd:
+                        srv.login(user, pwd)
+                    srv.send_message(msg)
+            else:
+                with smtplib.SMTP(host, port, timeout=15) as srv:
+                    if tls_mode in ("1", "starttls", "true"):
+                        srv.starttls()
+                    if user and pwd:
+                        srv.login(user, pwd)
+                    srv.send_message(msg)
+            app.logger.info(f"Email enviado a {to_email}: {subject}")
+        except Exception as e:
+            app.logger.warning(f"Fallo enviando email a {to_email}: {e}")
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
+def _notify_share(target_email: str, target_name: str, owner_name: str,
+                  owner_email: str, course_title: str, permission: str,
+                  course_token: str) -> None:
+    """Envía notificación de curso compartido al destinatario."""
+    public_url = os.environ.get("SCORM_PUBLIC_URL", "").rstrip("/")
+    library_link = f"{public_url}/biblioteca" if public_url else "(entra en SCORM Builder)"
+    perm_text = "ver y descargar" if permission == "view" else "ver, descargar y editar"
+
+    subject = f'📚 {owner_name} ha compartido un curso contigo: "{course_title}"'
+
+    body_text = f"""Hola {target_name},
+
+{owner_name} ({owner_email}) ha compartido un curso contigo en SCORM Builder:
+
+  📚 Curso: {course_title}
+  🔑 Permiso: {perm_text}
+
+Entra en tu biblioteca para acceder al curso:
+{library_link}
+
+Aparecerá en la sección "📥 Compartidos conmigo".
+
+—
+SCORM Builder
+(Este mensaje es automático, no respondas a este email.)
+"""
+
+    body_html = f"""<!DOCTYPE html>
+<html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <div style="background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: white; padding: 24px; border-radius: 8px;">
+    <h1 style="margin: 0; font-size: 22px;">📚 Nuevo curso compartido contigo</h1>
+  </div>
+  <div style="padding: 24px; background: #f9fafb; border-radius: 0 0 8px 8px;">
+    <p>Hola <strong>{html_escape(target_name)}</strong>,</p>
+    <p><strong>{html_escape(owner_name)}</strong> ({html_escape(owner_email)}) ha compartido un curso contigo en SCORM Builder:</p>
+    <table style="width: 100%; margin: 16px 0; border-collapse: collapse;">
+      <tr><td style="padding: 8px; background: white; border-radius: 4px;">
+        <p style="margin: 0;"><strong>📚 Curso:</strong> {html_escape(course_title)}</p>
+        <p style="margin: 4px 0 0;"><strong>🔑 Permiso:</strong> {perm_text}</p>
+      </td></tr>
+    </table>
+    <p style="margin-top: 20px;">
+      <a href="{library_link}" style="display: inline-block; padding: 12px 24px; background: #4f46e5; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">
+        Ver en mi biblioteca →
+      </a>
+    </p>
+    <p style="margin-top: 24px; font-size: 13px; color: #6b7280;">
+      Aparecerá en la sección <em>"📥 Compartidos conmigo"</em>.
+    </p>
+  </div>
+  <p style="text-align: center; color: #9ca3af; font-size: 12px; margin-top: 20px;">
+    SCORM Builder · Este mensaje es automático, no respondas a este email.
+  </p>
+</body></html>"""
+
+    _send_email_async(target_email, subject, body_text, body_html)
+
+
+# ============================================================
+# v0.5.15: Cliente Moodle Web Services (upload directo de SCORMs)
+# ============================================================
+# Permite subir los paquetes SCORM generados directamente al draft area
+# del usuario en Moodle, e intentar crear los módulos SCORM en el curso
+# si el plugin local_wsmanagesections está disponible.
+#
+# Requisitos en Moodle:
+#  1. Web Services activos (Site admin → Advanced features)
+#  2. REST protocol habilitado (Site admin → Plugins → WS protocols)
+#  3. Usuario con permiso webservice/rest:use + moodle/course:manageactivities
+#  4. Token generado para ese usuario y servicio
+#  5. Servicio incluye las funciones:
+#     - core_webservice_get_site_info  (siempre)
+#     - core_course_get_courses_by_field  (siempre)
+#     - core_files_upload  (siempre)
+#     - local_wsmanagesections_create_module  (opcional, plugin externo)
+
+import urllib.request
+import urllib.parse
+import urllib.error
+
+
+def _moodle_ws_call(moodle_url: str, token: str, function: str,
+                    params: Optional[dict] = None, timeout: int = 30):
+    """Llama a una función Moodle Web Service REST.
+    
+    Devuelve el JSON decodificado. Lanza Exception con mensaje útil si falla.
+    """
+    moodle_url = moodle_url.rstrip("/")
+    url = f"{moodle_url}/webservice/rest/server.php"
+    data = {
+        "wstoken": token,
+        "wsfunction": function,
+        "moodlewsrestformat": "json",
+    }
+    if params:
+        data.update(params)
+    encoded = urllib.parse.urlencode(data, doseq=True).encode("utf-8")
+    req = urllib.request.Request(url, data=encoded, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise Exception(f"Error HTTP de Moodle ({e.code}): {e.reason}")
+    except urllib.error.URLError as e:
+        raise Exception(f"No se pudo conectar a Moodle: {e.reason}")
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError:
+        raise Exception(f"Respuesta inválida de Moodle (no es JSON): {body[:200]}")
+    # Detectar error de Moodle: {"exception": "...", "errorcode": "...", "message": "..."}
+    if isinstance(result, dict) and result.get("exception"):
+        msg = result.get("message", "") or result.get("errorcode", "")
+        raise Exception(f"Moodle: {msg}")
+    return result
+
+
+def _moodle_upload_file(moodle_url: str, token: str, file_path: Path,
+                         timeout: int = 120) -> int:
+    """Sube un archivo al draft area del usuario del token.
+    
+    Devuelve el itemid del draftfile creado, que sirve para referenciarlo
+    al crear un módulo SCORM.
+    """
+    moodle_url = moodle_url.rstrip("/")
+    url = (f"{moodle_url}/webservice/upload.php"
+           f"?token={urllib.parse.quote(token)}&filearea=draft&itemid=0")
+    # multipart/form-data manual
+    boundary = f"----scormbuilder-{uuid.uuid4().hex}"
+    filename = file_path.name
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    parts = []
+    parts.append(f"--{boundary}".encode())
+    parts.append(
+        f'Content-Disposition: form-data; name="file_1"; filename="{filename}"'.encode()
+    )
+    parts.append(b"Content-Type: application/zip")
+    parts.append(b"")
+    parts.append(file_bytes)
+    parts.append(f"--{boundary}--".encode())
+    parts.append(b"")
+    body = b"\r\n".join(parts)
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            response = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise Exception(f"Error HTTP subiendo a Moodle ({e.code}): {e.reason}")
+    except urllib.error.URLError as e:
+        raise Exception(f"No se pudo conectar a Moodle: {e.reason}")
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError:
+        raise Exception(f"Respuesta inválida del upload (no es JSON): {response[:200]}")
+    # Error: {"error": "..."}
+    if isinstance(data, dict) and data.get("error"):
+        raise Exception(f"Moodle upload: {data['error']}")
+    # Éxito: lista de objetos con itemid
+    if not isinstance(data, list) or not data:
+        raise Exception(f"Respuesta inesperada del upload: {data}")
+    return int(data[0]["itemid"])
+
+
+def _moodle_test_connection(moodle_url: str, token: str) -> dict:
+    """Prueba el token llamando a core_webservice_get_site_info.
+    
+    Devuelve dict con sitename, username, fullname, functions disponibles.
+    """
+    info = _moodle_ws_call(moodle_url, token, "core_webservice_get_site_info")
+    functions = info.get("functions", [])
+    fn_names = {f.get("name") for f in functions if isinstance(f, dict)}
+    return {
+        "sitename": info.get("sitename", ""),
+        "username": info.get("username", ""),
+        "fullname": info.get("fullname", ""),
+        "userid": info.get("userid"),
+        "has_upload": True,  # /webservice/upload.php siempre está si WS está activo
+        "has_wsmanagesections": "local_wsmanagesections_create_module" in fn_names,
+        "function_count": len(fn_names),
+    }
+
+
+def _moodle_create_scorm_module(moodle_url: str, token: str, courseid: int,
+                                  section: int, draftitemid: int,
+                                  name: str) -> Optional[dict]:
+    """Intenta crear un módulo SCORM en el curso usando local_wsmanagesections.
+    
+    Si el plugin no está disponible, devuelve None (el usuario tendrá que
+    arrastrar el archivo manualmente desde su draftarea).
+    """
+    try:
+        result = _moodle_ws_call(
+            moodle_url, token,
+            "local_wsmanagesections_create_module",
+            {
+                "courseid": courseid,
+                "sectionnum": section,
+                "modulename": "scorm",
+                "name": name,
+                "introeditor[text]": f"Paquete SCORM: {name}",
+                "introeditor[format]": 1,  # HTML
+                "introeditor[itemid]": 0,
+                "packagefile": draftitemid,
+                "visible": 1,
+            },
+            timeout=60,
+        )
+        return result if isinstance(result, dict) else {"raw": result}
+    except Exception as e:
+        # plugin no disponible o error
+        return None
+
+
+@app.route("/api/curso/<token>/compartir", methods=["POST"])
+@login_required
+def course_share(token):
+    """v0.5.12: comparte un curso con otro usuario por email.
+    
+    Solo el dueño del curso puede compartir. Permisos: 'view' (solo ver/descargar)
+    o 'edit' (puede modificar).
+    """
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    target_email = (payload.get("email") or "").strip().lower()
+    permission = (payload.get("permission") or "view").strip().lower()
+    if permission not in ("view", "edit"):
+        return jsonify({"error": "Permiso debe ser 'view' o 'edit'"}), 400
+    if not target_email or "@" not in target_email:
+        return jsonify({"error": "Email no válido"}), 400
+    if target_email == user["email"].lower():
+        return jsonify({"error": "No puedes compartir un curso contigo mismo"}), 400
+
+    with db() as conn:
+        # Verificar que el curso es del usuario actual
+        course = conn.execute(
+            "SELECT id, title FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado o no eres el propietario"}), 404
+        # Buscar el usuario destinatario
+        target = conn.execute(
+            "SELECT id, email, display_name FROM users WHERE LOWER(email) = ?",
+            (target_email,),
+        ).fetchone()
+        if not target:
+            return jsonify({"error": f"No existe ningún usuario con email '{target_email}'. El destinatario debe registrarse primero."}), 404
+        # Insertar (o actualizar si ya existe)
+        try:
+            conn.execute(
+                """INSERT INTO course_shares (course_id, owner_id, shared_with_user_id, permission, created_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(course_id, shared_with_user_id) DO UPDATE SET permission=excluded.permission""",
+                (course["id"], user["id"], target["id"], permission, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+        except Exception as e:
+            return jsonify({"error": f"Error al guardar la compartición: {e}"}), 500
+
+        # v0.5.14: notificación email (no bloqueante, falla silenciosamente)
+        email_sent = False
+        if _smtp_configured():
+            _notify_share(
+                target_email=target["email"],
+                target_name=target["display_name"] or target["email"],
+                owner_name=user.get("display_name") or user["email"],
+                owner_email=user["email"],
+                course_title=course["title"],
+                permission=permission,
+                course_token=token,
+            )
+            email_sent = True
+
+        return jsonify({
+            "ok": True,
+            "shared_with": target["email"],
+            "shared_with_name": target["display_name"] or target["email"],
+            "permission": permission,
+            "email_sent": email_sent,
+            "email_configured": _smtp_configured(),
+        })
+
+
+@app.route("/api/curso/<token>/compartir/<int:user_id>", methods=["DELETE"])
+@login_required
+def course_unshare(token, user_id):
+    """v0.5.12: revoca la compartición de un curso con un usuario."""
+    user = current_user()
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado o no eres el propietario"}), 404
+        conn.execute(
+            "DELETE FROM course_shares WHERE course_id = ? AND shared_with_user_id = ?",
+            (course["id"], user_id),
+        )
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/curso/<token>/compartidos", methods=["GET"])
+@login_required
+def course_list_shares(token):
+    """v0.5.12: lista con quién está compartido este curso (solo dueño)."""
+    user = current_user()
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        shares = conn.execute(
+            """SELECT u.id, u.email, u.display_name, cs.permission, cs.created_at
+               FROM course_shares cs JOIN users u ON u.id = cs.shared_with_user_id
+               WHERE cs.course_id = ?
+               ORDER BY cs.created_at DESC""",
+            (course["id"],),
+        ).fetchall()
+    return jsonify({
+        "shares": [
+            {"user_id": s["id"], "email": s["email"],
+             "name": s["display_name"] or s["email"],
+             "permission": s["permission"],
+             "created_at": s["created_at"]}
+            for s in shares
+        ]
+    })
+
+
+# ============================================================
+# v0.5.15: Endpoints de integración con Moodle
+# ============================================================
+
+@app.route("/api/curso/<token>/moodle-config", methods=["GET"])
+@login_required
+def moodle_config_get(token):
+    """Devuelve la config Moodle guardada para este curso (sin el token, solo
+    indica si existe)."""
+    user = current_user()
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        cfg = conn.execute(
+            "SELECT * FROM moodle_configs WHERE course_id = ?",
+            (course["id"],),
+        ).fetchone()
+    if not cfg:
+        return jsonify({"configured": False})
+    return jsonify({
+        "configured": True,
+        "moodle_url": cfg["moodle_url"],
+        "moodle_courseid": cfg["moodle_courseid"],
+        "moodle_section": cfg["moodle_section"],
+        "token_set": bool(cfg["moodle_token"]),
+        "last_upload_at": cfg["last_upload_at"],
+        "last_upload_result": cfg["last_upload_result"],
+        "updated_at": cfg["updated_at"],
+    })
+
+
+@app.route("/api/curso/<token>/moodle-config", methods=["POST"])
+@login_required
+def moodle_config_save(token):
+    """Guarda/actualiza la config Moodle para este curso."""
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    moodle_url = (payload.get("moodle_url") or "").strip().rstrip("/")
+    moodle_token = (payload.get("moodle_token") or "").strip()
+    try:
+        moodle_courseid = int(payload.get("moodle_courseid") or 0)
+        moodle_section = int(payload.get("moodle_section") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "courseid y section deben ser números"}), 400
+
+    if not moodle_url or not moodle_url.startswith(("http://", "https://")):
+        return jsonify({"error": "URL de Moodle no válida (debe empezar con http:// o https://)"}), 400
+    if not moodle_token:
+        return jsonify({"error": "Falta el token de Web Services"}), 400
+    if moodle_courseid <= 0:
+        return jsonify({"error": "Falta el ID del curso de Moodle (número positivo)"}), 400
+
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        conn.execute(
+            """INSERT INTO moodle_configs
+               (course_id, moodle_url, moodle_token, moodle_courseid, moodle_section, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(course_id) DO UPDATE SET
+                 moodle_url=excluded.moodle_url,
+                 moodle_token=excluded.moodle_token,
+                 moodle_courseid=excluded.moodle_courseid,
+                 moodle_section=excluded.moodle_section,
+                 updated_at=excluded.updated_at""",
+            (course["id"], moodle_url, moodle_token, moodle_courseid,
+             moodle_section, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/curso/<token>/moodle-config", methods=["DELETE"])
+@login_required
+def moodle_config_delete(token):
+    """Borra la config Moodle (incluido el token guardado)."""
+    user = current_user()
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        conn.execute("DELETE FROM moodle_configs WHERE course_id = ?", (course["id"],))
+        conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/curso/<token>/moodle-test", methods=["POST"])
+@login_required
+def moodle_test(token):
+    """Prueba la conexión: verifica token + permisos en Moodle.
+    
+    Acepta el payload directo (probar antes de guardar) o usa la config guardada.
+    """
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    moodle_url = (payload.get("moodle_url") or "").strip().rstrip("/")
+    moodle_token = (payload.get("moodle_token") or "").strip()
+
+    if not moodle_url or not moodle_token:
+        # Usar config guardada
+        with db() as conn:
+            course = conn.execute(
+                "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+                (token, user["id"]),
+            ).fetchone()
+            if not course:
+                return jsonify({"error": "Curso no encontrado"}), 404
+            cfg = conn.execute(
+                "SELECT * FROM moodle_configs WHERE course_id = ?",
+                (course["id"],),
+            ).fetchone()
+            if not cfg:
+                return jsonify({"error": "No hay configuración Moodle guardada"}), 400
+            moodle_url = cfg["moodle_url"]
+            moodle_token = cfg["moodle_token"]
+
+    try:
+        info = _moodle_test_connection(moodle_url, moodle_token)
+        return jsonify({"ok": True, **info})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+def _collect_scorm_units(token: str, user: dict) -> List[dict]:
+    """Devuelve una lista de archivos SCORM (zips) del curso para subir.
+    
+    En modo batch hay un zip por unidad en salida/unidad_NN_*/scorm/*.zip.
+    En modo single (un solo Word) sólo hay un zip final.
+    """
+    row, _, _ = _load_course_for_user(token, user)
+    if not row:
+        return []
+    job_dir = Path(row["zip_path"]).parent
+    salida = job_dir / "salida"
+    if not salida.exists():
+        # Single mode: el zip principal es el SCORM
+        return [{
+            "name": row["title"],
+            "filename": Path(row["zip_path"]).name,
+            "path": str(row["zip_path"]),
+            "unit_index": 0,
+        }]
+    units = []
+    # Buscar unidades en modo batch
+    for unit_dir in sorted(salida.glob("unidad_*_*")):
+        if not unit_dir.is_dir():
+            continue
+        scorm_dir = unit_dir / "scorm"
+        if scorm_dir.exists():
+            zips = list(scorm_dir.glob("*.zip"))
+            if zips:
+                # Tomar el primer zip de la carpeta scorm de cada unidad
+                zip_path = zips[0]
+                # Extraer índice del nombre de la carpeta
+                m = re.match(r"unidad_(\d+)_(.+)", unit_dir.name)
+                idx = int(m.group(1)) if m else 0
+                title = (m.group(2).replace("_", " ") if m else unit_dir.name)
+                units.append({
+                    "name": title,
+                    "filename": zip_path.name,
+                    "path": str(zip_path),
+                    "unit_index": idx,
+                })
+    if units:
+        return units
+    # Fallback: zip principal
+    return [{
+        "name": row["title"],
+        "filename": Path(row["zip_path"]).name,
+        "path": str(row["zip_path"]),
+        "unit_index": 0,
+    }]
+
+
+@app.route("/api/curso/<token>/moodle-units", methods=["GET"])
+@login_required
+def moodle_units(token):
+    """Lista las unidades SCORM disponibles para subir."""
+    user = current_user()
+    units = _collect_scorm_units(token, user)
+    if not units:
+        return jsonify({"error": "No hay archivos SCORM para subir"}), 404
+    return jsonify({
+        "units": [
+            {"name": u["name"], "filename": u["filename"],
+             "unit_index": u["unit_index"],
+             "size": Path(u["path"]).stat().st_size if Path(u["path"]).exists() else 0}
+            for u in units
+        ]
+    })
+
+
+@app.route("/api/curso/<token>/moodle-upload", methods=["POST"])
+@login_required
+def moodle_upload(token):
+    """Sube uno o más SCORMs al Moodle configurado.
+    
+    Lanza la subida en un job en background y devuelve job_id para polling.
+    Si el plugin local_wsmanagesections está disponible, también crea el
+    módulo SCORM en el curso. Si no, devuelve el draftitemid y URL de Moodle
+    para que el usuario lo cree manualmente.
+    """
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    selected_indices = payload.get("unit_indices")  # None = todas
+
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id, title FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        cfg = conn.execute(
+            "SELECT * FROM moodle_configs WHERE course_id = ?",
+            (course["id"],),
+        ).fetchone()
+        if not cfg:
+            return jsonify({"error": "Falta configurar Moodle para este curso"}), 400
+
+    units = _collect_scorm_units(token, user)
+    if selected_indices is not None and isinstance(selected_indices, list):
+        units = [u for u in units if u["unit_index"] in selected_indices]
+    if not units:
+        return jsonify({"error": "No hay archivos SCORM para subir"}), 404
+
+    # Crear job en background
+    job_id = uuid.uuid4().hex[:16]
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "kind": "moodle_upload",
+            "state": "running",
+            "total": len(units),
+            "progress": 0,
+            "current_step": 0,
+            "current_label": "Preparando subida a Moodle...",
+            "started": _bg_time.time(),
+            "started_at": _bg_time.time(),
+            "result": None,
+            "error": None,
+            "log": [],
+            "snapshot_id": None,
+        }
+
+    moodle_url = cfg["moodle_url"]
+    moodle_token = cfg["moodle_token"]
+    moodle_courseid = cfg["moodle_courseid"]
+    moodle_section = cfg["moodle_section"]
+    course_id_db = course["id"]
+    course_title = course["title"]
+
+    def worker():
+        results = []
+        ok_count = 0
+        fail_count = 0
+        plugin_available = None
+        # Detectar plugin una sola vez
+        try:
+            info = _moodle_test_connection(moodle_url, moodle_token)
+            plugin_available = info.get("has_wsmanagesections", False)
+        except Exception as e:
+            with _jobs_lock:
+                _jobs[job_id]["state"] = "error"
+                _jobs[job_id]["error"] = f"Test de conexión falló: {e}"
+            return
+
+        for i, unit in enumerate(units, 1):
+            with _jobs_lock:
+                _jobs[job_id]["current_step"] = i - 1
+                _jobs[job_id]["progress"] = int(((i - 1) / max(1, len(units))) * 100)
+                _jobs[job_id]["current_label"] = f"Subiendo {unit['filename']}..."
+            try:
+                draftitemid = _moodle_upload_file(
+                    moodle_url, moodle_token, Path(unit["path"]),
+                )
+                # Intentar crear módulo si hay plugin
+                created = None
+                if plugin_available:
+                    created = _moodle_create_scorm_module(
+                        moodle_url, moodle_token, moodle_courseid,
+                        moodle_section, draftitemid,
+                        f"{course_title} · {unit['name']}",
+                    )
+                results.append({
+                    "unit_index": unit["unit_index"],
+                    "name": unit["name"],
+                    "filename": unit["filename"],
+                    "ok": True,
+                    "draftitemid": draftitemid,
+                    "module_created": bool(created),
+                    "module_info": created,
+                })
+                ok_count += 1
+            except Exception as e:
+                results.append({
+                    "unit_index": unit["unit_index"],
+                    "name": unit["name"],
+                    "filename": unit["filename"],
+                    "ok": False,
+                    "error": str(e),
+                })
+                fail_count += 1
+
+        # Persistir resumen
+        summary = {
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "results": results,
+            "plugin_available": plugin_available,
+            "moodle_courseid": moodle_courseid,
+            "moodle_url": moodle_url,
+        }
+        try:
+            with db() as conn:
+                conn.execute(
+                    """UPDATE moodle_configs SET
+                       last_upload_at=?, last_upload_result=?
+                       WHERE course_id=?""",
+                    (datetime.utcnow().isoformat(),
+                     json.dumps(summary)[:8000], course_id_db),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+        with _jobs_lock:
+            _jobs[job_id]["state"] = "done"
+            _jobs[job_id]["current_step"] = len(units)
+            _jobs[job_id]["progress"] = 100
+            _jobs[job_id]["result"] = summary
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    return jsonify({"job_id": job_id, "total": len(units)})
+
+
 @app.route("/biblioteca")
 @login_required
 def library():
     user = current_user()
     with db() as conn:
-        rows = conn.execute(
+        own_rows = conn.execute(
             "SELECT * FROM courses WHERE user_id = ? ORDER BY id DESC",
             (user["id"],),
         ).fetchall()
-    if not rows:
+        # v0.5.12: cursos compartidos conmigo
+        shared_rows = conn.execute(
+            """SELECT c.*, cs.permission, u.email AS owner_email,
+                      u.display_name AS owner_name
+               FROM courses c
+               JOIN course_shares cs ON cs.course_id = c.id
+               JOIN users u ON u.id = c.user_id
+               WHERE cs.shared_with_user_id = ?
+               ORDER BY cs.created_at DESC""",
+            (user["id"],),
+        ).fetchall()
+
+    if not own_rows and not shared_rows:
         body = """
         <div class="empty">
           <div class="icon">📚</div>
@@ -1911,18 +2777,16 @@ def library():
         </div>
         """
     else:
-        cards = []
-        for r in rows:
-            warnings = []
+        def _card_for_row(r, is_shared=False):
+            warns = []
             try:
-                warnings = json.loads(r["warnings_json"] or "[]")
+                warns = json.loads(r["warnings_json"] or "[]")
             except Exception:
                 pass
             warning_badge = (
-                f'<span style="background:#FFFBEB;color:#92400E;">⚠ {len(warnings)} aviso(s)</span>'
-                if warnings else ""
+                f'<span style="background:#FFFBEB;color:#92400E;">⚠ {len(warns)} aviso(s)</span>'
+                if warns else ""
             )
-            # v0.5.10: detectar qué mejoras IA tiene el curso leyendo su structure.json
             ai_badges = _detect_ai_features(Path(r["zip_path"]).parent)
             ai_html = ""
             if ai_badges:
@@ -1935,8 +2799,35 @@ def library():
             size_kb = (r["zip_size"] or 0) / 1024
             size_str = f"{size_kb:,.0f} KB" if size_kb < 1024 else f"{size_kb/1024:,.1f} MB"
             created = r["created_at"][:16].replace("T", " ")
-            cards.append(f"""
-            <div class="course-card{' has-ai' if ai_badges else ''}">
+
+            if is_shared:
+                permission = r["permission"]
+                owner = r["owner_name"] or r["owner_email"]
+                share_banner = (f'<div class="share-banner share-in">🔗 Compartido por '
+                                f'<strong>{owner}</strong> · permiso: '
+                                f'{"editar" if permission == "edit" else "ver"}</div>')
+                edit_btn = (f'<a class="btn secondary" href="/curso/{r["token"]}/editar">Editar</a>'
+                            if permission == "edit" else "")
+                actions = (f'<a class="btn" href="/api/descargar/{r["token"]}">Descargar ZIP</a>'
+                           f'<a class="btn secondary" href="/curso/{r["token"]}">Detalle</a>'
+                           f'{edit_btn}')
+            else:
+                title_js = (r['title'] or 'curso').replace("'", "\\'").replace('"', '&quot;')
+                share_banner = ""
+                actions = (
+                    f'<a class="btn" href="/api/descargar/{r["token"]}">Descargar ZIP</a>'
+                    f'<a class="btn secondary" href="/curso/{r["token"]}">Detalle</a>'
+                    f'<a class="btn secondary" href="/curso/{r["token"]}/editar">Editar</a>'
+                    f'<button type="button" class="btn secondary" '
+                    f'onclick="openShareDialog(\'{r["token"]}\', \'{title_js}\')">🔗 Compartir</button>'
+                    f'<form method="post" action="/curso/{r["token"]}/borrar" style="display:inline;" '
+                    f'onsubmit="return confirm(\'¿Borrar este curso definitivamente?\')">'
+                    f'<button type="submit" class="btn danger">Borrar</button>'
+                    f'</form>'
+                )
+            return f"""
+            <div class="course-card{' has-ai' if ai_badges else ''}{' shared-in' if is_shared else ''}">
+              {share_banner}
               <h3>{(r['title'] or 'Sin título')}</h3>
               <div class="course-meta">
                 <span>{r['num_topics'] or 0} tema(s)</span>
@@ -1948,17 +2839,124 @@ def library():
               </div>
               {ai_html}
               <div class="course-date">📅 {created}</div>
-              <div class="course-actions">
-                <a class="btn" href="/api/descargar/{r['token']}">Descargar ZIP</a>
-                <a class="btn secondary" href="/curso/{r['token']}">Detalle</a>
-                <a class="btn secondary" href="/curso/{r['token']}/editar">Editar</a>
-                <form method="post" action="/curso/{r['token']}/borrar" style="display:inline;"
-                      onsubmit="return confirm('¿Borrar este curso definitivamente?')">
-                  <button type="submit" class="btn danger">Borrar</button>
-                </form>
+              <div class="course-actions">{actions}</div>
+            </div>"""
+
+        sections = []
+        if own_rows:
+            cards_own = "".join(_card_for_row(r, is_shared=False) for r in own_rows)
+            sections.append(f'<h2 class="library-section-title">Mis cursos</h2>'
+                            f'<div class="course-grid">{cards_own}</div>')
+        if shared_rows:
+            cards_shr = "".join(_card_for_row(r, is_shared=True) for r in shared_rows)
+            sections.append(f'<h2 class="library-section-title">📥 Compartidos conmigo</h2>'
+                            f'<div class="course-grid">{cards_shr}</div>')
+
+        share_dialog = """
+        <div id="shareDialog" class="share-dialog-bg" style="display:none;" onclick="if(event.target===this)closeShareDialog()">
+          <div class="share-dialog">
+            <h3>🔗 Compartir curso</h3>
+            <p id="shareDialogTitle" class="share-dialog-title"></p>
+            <div id="shareDialogCurrent" class="share-dialog-current"></div>
+            <div class="share-dialog-form">
+              <label>Email del destinatario:</label>
+              <input type="email" id="shareEmail" placeholder="usuario@ejemplo.com">
+              <label>Permiso:</label>
+              <select id="sharePermission">
+                <option value="view">Ver y descargar (recomendado)</option>
+                <option value="edit">Editar (también puede modificar)</option>
+              </select>
+              <p style="font-size:0.8rem;color:var(--ink-mute);">El destinatario debe estar ya registrado en la plataforma.</p>
+              <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem;">
+                <button class="btn secondary" onclick="closeShareDialog()">Cancelar</button>
+                <button class="btn" onclick="doShare()">Compartir</button>
               </div>
-            </div>""")
-        body = f'<div class="course-grid">{"".join(cards)}</div>'
+              <p id="shareError" class="share-err" style="display:none;"></p>
+              <p id="shareOk" class="share-ok" style="display:none;"></p>
+            </div>
+          </div>
+        </div>
+        <script>
+        let _currentShareToken = null;
+        async function openShareDialog(token, title) {
+          _currentShareToken = token;
+          document.getElementById('shareDialogTitle').textContent = title;
+          document.getElementById('shareEmail').value = '';
+          document.getElementById('sharePermission').value = 'view';
+          document.getElementById('shareError').style.display = 'none';
+          document.getElementById('shareDialog').style.display = 'flex';
+          const cur = document.getElementById('shareDialogCurrent');
+          cur.innerHTML = '<em>Cargando...</em>';
+          try {
+            const r = await fetch('/api/curso/' + token + '/compartidos');
+            const data = await r.json();
+            if (!r.ok) { cur.innerHTML = ''; return; }
+            if (!data.shares || !data.shares.length) {
+              cur.innerHTML = '<p style="font-size:0.85rem;color:var(--ink-mute);">Aún no compartido con nadie</p>';
+            } else {
+              cur.innerHTML = '<p style="font-weight:600;font-size:0.85rem;margin-bottom:0.4rem;">Compartido con:</p>' +
+                data.shares.map(s =>
+                  '<div class="share-item">' +
+                  '<span>👤 ' + s.name + ' (' + s.email + ') · ' + (s.permission==='edit'?'editar':'ver') + '</span>' +
+                  '<button class="btn-link-danger" onclick="removeShare(' + s.user_id + ')">Quitar</button>' +
+                  '</div>'
+                ).join('');
+            }
+          } catch (e) { cur.innerHTML = ''; }
+        }
+        function closeShareDialog() {
+          document.getElementById('shareDialog').style.display = 'none';
+          _currentShareToken = null;
+        }
+        async function doShare() {
+          const email = document.getElementById('shareEmail').value.trim();
+          const permission = document.getElementById('sharePermission').value;
+          const errEl = document.getElementById('shareError');
+          const okEl = document.getElementById('shareOk');
+          errEl.style.display = 'none';
+          if (okEl) okEl.style.display = 'none';
+          if (!email) { errEl.textContent = 'Indica un email'; errEl.style.display = 'block'; return; }
+          try {
+            const r = await fetch('/api/curso/' + _currentShareToken + '/compartir', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({email: email, permission: permission}),
+            });
+            const data = await r.json();
+            if (!r.ok) {
+              errEl.textContent = data.error || 'Error desconocido';
+              errEl.style.display = 'block';
+              return;
+            }
+            // v0.5.14: feedback si se envió email o no
+            if (okEl) {
+              if (data.email_sent) {
+                okEl.textContent = '✓ Compartido con ' + (data.shared_with_name || email) + ' · 📧 Notificación enviada por email';
+              } else if (data.email_configured === false) {
+                okEl.textContent = '✓ Compartido con ' + (data.shared_with_name || email) + ' · (sin notificación email: SMTP no configurado en el servidor)';
+              } else {
+                okEl.textContent = '✓ Compartido con ' + (data.shared_with_name || email);
+              }
+              okEl.style.display = 'block';
+            }
+            await openShareDialog(_currentShareToken, document.getElementById('shareDialogTitle').textContent);
+            document.getElementById('shareEmail').value = '';
+          } catch (e) {
+            errEl.textContent = 'Error: ' + e.message;
+            errEl.style.display = 'block';
+          }
+        }
+        async function removeShare(userId) {
+          if (!confirm('¿Quitar el acceso a este usuario?')) return;
+          try {
+            await fetch('/api/curso/' + _currentShareToken + '/compartir/' + userId, {method:'DELETE'});
+            await openShareDialog(_currentShareToken, document.getElementById('shareDialogTitle').textContent);
+          } catch (e) { alert('Error: ' + e.message); }
+        }
+        </script>
+        """
+        body = "\n".join(sections) + share_dialog
+
     page = render_page("Mis cursos", body, user=user, active="library")
     return page.replace("</style>", LIBRARY_EXTRA_CSS + "</style>", 1)
 
@@ -1966,12 +2964,20 @@ def library():
 @app.route("/curso/<token>")
 @login_required
 def course_detail(token):
+    """v0.5.16: dueños y destinatarios de share (cualquier permiso) pueden ver."""
     user = current_user()
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM courses WHERE token = ? AND user_id = ?",
             (token, user["id"]),
         ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT c.* FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ?""",
+                (token, user["id"]),
+            ).fetchone()
     if not row:
         abort(404)
     warnings = []
@@ -2057,13 +3063,23 @@ def course_delete(token):
 @app.route("/curso/<token>/editar")
 @login_required
 def course_edit(token):
-    """Página de edición del curso. Carga la estructura JSON y muestra un editor."""
+    """Página de edición del curso. Carga la estructura JSON y muestra un editor.
+    
+    v0.5.16: también pueden editar destinatarios de share con permiso 'edit'.
+    """
     user = current_user()
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM courses WHERE token = ? AND user_id = ?",
             (token, user["id"]),
         ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT c.* FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ? AND cs.permission = 'edit'""",
+                (token, user["id"]),
+            ).fetchone()
     if not row:
         abort(404)
     structure_path = Path(row["zip_path"]).parent / "structure.json"
@@ -2077,6 +3093,56 @@ def course_edit(token):
       <p class="page-sub">Cambios sobre <strong>{html_escape(row['title'])}</strong>. Al guardar se reempaqueta el SCORM con tus cambios; el ZIP descargable se actualiza automáticamente.</p>
     </div>
     <div id="editor-root">Cargando…</div>
+
+    <!-- v0.5.15: Modal Subir a Moodle -->
+    <div id="moodleDialog" class="moodle-dialog-bg" style="display:none;" onclick="if(event.target===this)closeMoodleDialog()">
+      <div class="moodle-dialog">
+        <div class="moodle-dialog-head">
+          <h3>📤 Subir a Moodle</h3>
+          <button type="button" class="moodle-close" onclick="closeMoodleDialog()">×</button>
+        </div>
+        <div class="moodle-dialog-body">
+          <div class="moodle-help">
+            <strong>Cómo obtener un token de Web Services:</strong>
+            <ol>
+              <li>En tu Moodle, asegúrate de tener activos los Web Services (Site admin → Advanced features → Enable web services).</li>
+              <li>Site admin → Plugins → Web services → External services → habilita "REST protocol".</li>
+              <li>Site admin → Users → Permissions → Define roles. Crea (o asigna) un rol con permiso <code>webservice/rest:use</code> y <code>moodle/course:manageactivities</code> sobre el curso destino.</li>
+              <li>Site admin → Plugins → Web services → Manage tokens → "Add" para generar un token para tu usuario sobre el servicio "Moodle mobile web service" (o uno custom).</li>
+              <li>Copia el token y pégalo abajo. El <strong>ID del curso</strong> está en la URL de Moodle: <code>...course/view.php?id=<strong>42</strong></code></li>
+            </ol>
+          </div>
+          <h4>Configuración</h4>
+          <div class="moodle-form">
+            <label>URL del Moodle
+              <input type="url" id="moodleUrl" placeholder="https://moodle.miinstitucion.com" required>
+            </label>
+            <label>Token de Web Services
+              <input type="text" id="moodleToken" placeholder="Pega aquí el token de Moodle" autocomplete="off">
+            </label>
+            <label>ID del curso (en Moodle)
+              <input type="number" id="moodleCourseId" placeholder="ej: 42" min="1">
+            </label>
+            <label>Número de sección (0 = sección general)
+              <input type="number" id="moodleSection" value="0" min="0">
+            </label>
+            <div class="moodle-form-actions">
+              <button class="btn secondary" onclick="testMoodleConnection()">🔌 Probar conexión</button>
+              <button class="btn secondary" onclick="saveMoodleConfig(false)">💾 Guardar configuración</button>
+            </div>
+            <div id="moodleTestResult" class="moodle-test-result" style="display:none;"></div>
+          </div>
+          <h4>Paquetes SCORM a subir</h4>
+          <div id="moodleUnitsList" class="moodle-units-list">
+            <p style="color:#6b7280;font-style:italic;">Cargando lista...</p>
+          </div>
+          <div class="moodle-upload-actions">
+            <button class="btn" onclick="startMoodleUpload()">📤 Subir los SCORMs seleccionados</button>
+          </div>
+          <div id="moodleUploadResult"></div>
+        </div>
+      </div>
+    </div>
 
     <script>
     const TOKEN = "{token}";
@@ -2162,8 +3228,10 @@ def course_edit(token):
       // GRUPO 3: revisar/exportar
       h += '<div class="ed-group ed-group-export" data-label="Revisar y exportar">';
       h += '<button type="button" class="btn secondary ed-act-wcag-check" title="Comprueba la accesibilidad del curso según WCAG 2.1 AA">🔍 Validar WCAG 2.1 AA</button>';
+      h += '<button type="button" class="btn secondary ed-act-download-aiken" title="Descarga las preguntas Aiken como archivo ZIP separado (para subir a Moodle o sistemas externos)">📥 Aiken (.zip)</button>';
       h += '<button type="button" class="btn secondary ed-act-export-imscp" title="Exporta como paquete IMS Content Package para Moodle">📦 IMS CP (Moodle)</button>';
       h += '<button type="button" class="btn secondary ed-act-export-cmi5" title="Exporta como paquete cmi5 / xAPI">⚡ cmi5 / xAPI</button>';
+      h += '<button type="button" class="btn ed-act-moodle-upload" title="Sube los paquetes SCORM directamente a un curso de Moodle">📤 Subir a Moodle</button>';
       h += '</div>';
 
       // Estado
@@ -2227,6 +3295,208 @@ def course_edit(token):
 
     function setStatus(msg) {{
       document.querySelectorAll('.ed-status').forEach(s => s.textContent = msg);
+    }}
+
+    // ====================================================================
+    // v0.5.15: Subir a Moodle - modal de configuración + subida
+    // ====================================================================
+    async function openMoodleDialog() {{
+      const dlg = document.getElementById('moodleDialog');
+      if (!dlg) {{ alert('Diálogo Moodle no disponible'); return; }}
+      dlg.style.display = 'flex';
+      // Resetear feedback
+      document.getElementById('moodleTestResult').style.display = 'none';
+      document.getElementById('moodleUploadResult').innerHTML = '';
+      // Cargar config existente
+      try {{
+        const r = await fetch('/api/curso/' + TOKEN + '/moodle-config');
+        if (r.ok) {{
+          const cfg = await r.json();
+          if (cfg.configured) {{
+            document.getElementById('moodleUrl').value = cfg.moodle_url || '';
+            document.getElementById('moodleCourseId').value = cfg.moodle_courseid || '';
+            document.getElementById('moodleSection').value = cfg.moodle_section || 0;
+            if (cfg.token_set) {{
+              document.getElementById('moodleToken').placeholder = '(token ya guardado, escribe uno nuevo para cambiarlo)';
+            }}
+          }}
+        }}
+      }} catch (e) {{}}
+      // Cargar lista de unidades disponibles
+      try {{
+        const ru = await fetch('/api/curso/' + TOKEN + '/moodle-units');
+        const du = await ru.json();
+        const ul = document.getElementById('moodleUnitsList');
+        if (du.units && du.units.length) {{
+          ul.innerHTML = du.units.map(u =>
+            '<label class="moodle-unit-row">' +
+            '<input type="checkbox" class="moodle-unit-cb" data-idx="' + u.unit_index + '" checked> ' +
+            '<span>' + escapeHtml(u.name) + '</span>' +
+            '<span class="moodle-unit-size">' + Math.round((u.size || 0) / 1024) + ' KB · ' + escapeHtml(u.filename) + '</span>' +
+            '</label>'
+          ).join('');
+        }} else {{
+          ul.innerHTML = '<p style="color:#dc2626;">' + (du.error || 'No hay paquetes SCORM disponibles. Genera el curso primero.') + '</p>';
+        }}
+      }} catch (e) {{
+        document.getElementById('moodleUnitsList').innerHTML = '<p style="color:#dc2626;">Error: ' + e.message + '</p>';
+      }}
+    }}
+    function closeMoodleDialog() {{
+      document.getElementById('moodleDialog').style.display = 'none';
+    }}
+    async function saveMoodleConfig(silent) {{
+      const moodle_url = document.getElementById('moodleUrl').value.trim();
+      const moodle_token = document.getElementById('moodleToken').value.trim();
+      const moodle_courseid = parseInt(document.getElementById('moodleCourseId').value || 0);
+      const moodle_section = parseInt(document.getElementById('moodleSection').value || 0);
+      if (!moodle_url || !moodle_courseid) {{
+        if (!silent) alert('Faltan URL del Moodle o ID del curso');
+        return false;
+      }}
+      // Si el campo token está vacío y ya había uno guardado, no lo enviamos
+      // (esto se podría mejorar más adelante para permitir "borrar y guardar igual")
+      const body = {{ moodle_url, moodle_courseid, moodle_section }};
+      if (moodle_token) body.moodle_token = moodle_token;
+      // Si no hay token nuevo, hay que reusar el guardado; pero el backend exige token,
+      // así que sólo guardamos cuando haya token nuevo
+      if (!moodle_token) {{
+        if (!silent) alert('Por favor introduce el token de Web Services. Si ya guardaste uno antes, vuelve a pegarlo para cambiarlo.');
+        return false;
+      }}
+      body.moodle_token = moodle_token;
+      try {{
+        const r = await fetch('/api/curso/' + TOKEN + '/moodle-config', {{
+          method: 'POST', headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(body)
+        }});
+        const data = await r.json();
+        if (!r.ok) {{
+          if (!silent) alert('Error: ' + (data.error || 'desconocido'));
+          return false;
+        }}
+        if (!silent) setStatus('✓ Config Moodle guardada');
+        return true;
+      }} catch (e) {{
+        if (!silent) alert('Error: ' + e.message);
+        return false;
+      }}
+    }}
+    async function testMoodleConnection() {{
+      const moodle_url = document.getElementById('moodleUrl').value.trim();
+      const moodle_token = document.getElementById('moodleToken').value.trim();
+      const resEl = document.getElementById('moodleTestResult');
+      resEl.style.display = 'block';
+      resEl.className = 'moodle-test-result loading';
+      resEl.innerHTML = '⏳ Probando conexión con Moodle...';
+      try {{
+        // Si hay token nuevo, lo usamos en el test; si no, intenta el guardado
+        const body = (moodle_url && moodle_token) ? {{ moodle_url, moodle_token }} : {{}};
+        const r = await fetch('/api/curso/' + TOKEN + '/moodle-test', {{
+          method: 'POST', headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(body)
+        }});
+        const data = await r.json();
+        if (!r.ok) {{
+          resEl.className = 'moodle-test-result err';
+          resEl.innerHTML = '❌ ' + (data.error || 'desconocido');
+          return;
+        }}
+        resEl.className = 'moodle-test-result ok';
+        let html = '<strong>✓ Conexión correcta</strong><br>';
+        html += 'Moodle: <em>' + escapeHtml(data.sitename || '') + '</em><br>';
+        html += 'Usuario: <em>' + escapeHtml(data.fullname || data.username || '') + '</em><br>';
+        html += 'Plugin gestor de secciones: ' + (data.has_wsmanagesections ? '✓ disponible (crearé el módulo SCORM automáticamente)' : '⚠ no disponible (subiré el archivo, luego tendrás que añadirlo al curso manualmente desde Moodle)') + '<br>';
+        html += 'Funciones accesibles: ' + (data.function_count || 0);
+        resEl.innerHTML = html;
+      }} catch (e) {{
+        resEl.className = 'moodle-test-result err';
+        resEl.innerHTML = '❌ ' + e.message;
+      }}
+    }}
+    async function startMoodleUpload() {{
+      // Primero asegurar que hay config guardada
+      const okSave = await saveMoodleConfig(false);
+      if (!okSave) return;
+
+      const checkboxes = document.querySelectorAll('.moodle-unit-cb:checked');
+      const indices = Array.from(checkboxes).map(cb => parseInt(cb.dataset.idx));
+      if (!indices.length) {{
+        alert('Selecciona al menos una unidad para subir');
+        return;
+      }}
+      const resEl = document.getElementById('moodleUploadResult');
+      resEl.innerHTML = '<p>⏳ Iniciando subida de ' + indices.length + ' SCORM(s)...</p>';
+      try {{
+        const r = await fetch('/api/curso/' + TOKEN + '/moodle-upload', {{
+          method: 'POST', headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{ unit_indices: indices }})
+        }});
+        const data = await r.json();
+        if (!r.ok) {{
+          resEl.innerHTML = '<p style="color:#dc2626;">❌ ' + (data.error || 'Error desconocido') + '</p>';
+          return;
+        }}
+        // Polling del job
+        await pollMoodleJob(data.job_id, data.total, resEl);
+      }} catch (e) {{
+        resEl.innerHTML = '<p style="color:#dc2626;">❌ ' + e.message + '</p>';
+      }}
+    }}
+    async function pollMoodleJob(jobId, total, resEl) {{
+      for (let i = 0; i < 600; i++) {{  // máximo 10 min
+        await new Promise(r => setTimeout(r, 1000));
+        try {{
+          const r = await fetch('/api/jobs/' + jobId);
+          if (!r.ok) continue;
+          const job = await r.json();
+          if (job.state === 'running') {{
+            const pct = total > 0 ? Math.round((job.current_step / total) * 100) : 0;
+            resEl.innerHTML =
+              '<p>⏳ ' + escapeHtml(job.current_label || 'Procesando...') + '</p>' +
+              '<div class="moodle-progress"><div class="moodle-progress-bar" style="width:' + pct + '%;"></div></div>' +
+              '<p style="font-size:0.8rem;color:#6b7280;">Paso ' + job.current_step + '/' + total + '</p>';
+          }} else if (job.state === 'done') {{
+            renderMoodleResults(job.result, resEl);
+            return;
+          }} else if (job.state === 'error') {{
+            resEl.innerHTML = '<p style="color:#dc2626;">❌ ' + escapeHtml(job.error || 'Error') + '</p>';
+            return;
+          }}
+        }} catch (e) {{}}
+      }}
+      resEl.innerHTML += '<p style="color:#dc2626;">⏰ Tiempo de espera agotado</p>';
+    }}
+    function renderMoodleResults(res, resEl) {{
+      if (!res) {{ resEl.innerHTML = '<p style="color:#dc2626;">Sin resultado</p>'; return; }}
+      const ok = res.ok_count || 0;
+      const fail = res.fail_count || 0;
+      let html = '<div class="moodle-summary">';
+      html += '<p><strong>Resultado:</strong> ' + ok + ' subido(s) · ' + fail + ' error(es)</p>';
+      if (!res.plugin_available) {{
+        html += '<p class="moodle-warn">⚠ El plugin <code>local_wsmanagesections</code> no está instalado en tu Moodle. Los archivos SCORM se han subido a tu <strong>draft area</strong>, pero <strong>debes crear el módulo SCORM en Moodle manualmente</strong>: ve al curso destino, "Activar edición → Añadir actividad o recurso → SCORM", y en la sección "Paquete" arrastra el archivo desde la pestaña "Archivos recientes" o "Mis archivos privados". También puedes pedir a tu admin que instale el plugin <a href="https://moodle.org/plugins/local_wsmanagesections" target="_blank">local_wsmanagesections</a> para automatizar la creación de módulos.</p>';
+      }}
+      html += '</div>';
+      html += '<table class="moodle-results-table">';
+      html += '<thead><tr><th>Unidad</th><th>Archivo</th><th>Estado</th></tr></thead><tbody>';
+      (res.results || []).forEach(r => {{
+        let estado = '';
+        if (r.ok) {{
+          if (r.module_created) {{
+            estado = '<span style="color:#059669;">✓ Subido + módulo creado</span>';
+          }} else {{
+            estado = '<span style="color:#2563eb;">✓ Subido al draftarea (itemid ' + r.draftitemid + ')</span>';
+          }}
+        }} else {{
+          estado = '<span style="color:#dc2626;">❌ ' + escapeHtml(r.error || 'error') + '</span>';
+        }}
+        html += '<tr><td>' + escapeHtml(r.name || '-') + '</td><td><code>' + escapeHtml(r.filename || '-') + '</code></td><td>' + estado + '</td></tr>';
+      }});
+      html += '</tbody></table>';
+      if (res.moodle_url && res.moodle_courseid) {{
+        html += '<p style="margin-top:1rem;"><a class="btn" href="' + res.moodle_url + '/course/view.php?id=' + res.moodle_courseid + '" target="_blank">Abrir curso en Moodle →</a></p>';
+      }}
+      resEl.innerHTML = html;
     }}
 
     function render() {{
@@ -2320,6 +3590,28 @@ def course_edit(token):
                 '</div>';
             }}
           }});
+          // v0.5.13: Panel de preguntas de repaso (inline_quiz) por subapartado
+          const subId = s.id || ('s' + ti + '_' + si);
+          const inlineQs = (t.inline_quiz && t.inline_quiz[subId]) || [];
+          html += '<div class="ed-inline-quiz" data-topic="' + ti + '" data-sub="' + si + '" data-subid="' + escapeHtml(subId) + '">';
+          html += '<div class="ed-inline-quiz-head">';
+          html += '<strong>💡 Preguntas de repaso de este subapartado</strong>';
+          html += '<span class="ed-inline-quiz-count">' + inlineQs.length + ' pregunta(s)</span>';
+          html += '</div>';
+          if (inlineQs.length > 0) {{
+            inlineQs.forEach((q, qi) => {{
+              html += renderInlineQuiz(ti, si, subId, qi, q);
+            }});
+          }} else {{
+            html += '<p class="ed-inline-quiz-empty">No hay preguntas de repaso en este subapartado. Añade preguntas manualmente o usa la IA con "📚 Banco Aiken".</p>';
+          }}
+          html += '<div class="ed-inline-quiz-add">';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="iq-add" data-topic="' + ti + '" data-sub="' + si + '" data-subid="' + escapeHtml(subId) + '" data-qtype="multiple_choice">+ Pregunta tipo test</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="iq-add" data-topic="' + ti + '" data-sub="' + si + '" data-subid="' + escapeHtml(subId) + '" data-qtype="true_false">+ Verdadero/Falso</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="iq-add" data-topic="' + ti + '" data-sub="' + si + '" data-subid="' + escapeHtml(subId) + '" data-qtype="fill_blank">+ Hueco</button>';
+          html += '</div>';
+          html += '</div>';
+
           // Botón añadir bloque (al final del subapartado)
           html += '<div class="ed-add-block">';
           html += '<details><summary>+ Añadir bloque</summary>';
@@ -2385,30 +3677,31 @@ def course_edit(token):
 
         html += '</div>';  // ed-ai-advanced-body
         html += '</details>';
-        // Quiz
+        // Quiz final del tema (v0.5.14: con UI completa, parity con inline_quiz)
         if (t.quiz && t.quiz.length) {{
-          html += '<div class="ed-quiz"><h3>Preguntas del quiz <button type="button" class="btn-ai-mini" data-topic="' + ti + '" data-mode="extra">+ Añadir 5 más con IA</button></h3>';
+          html += '<div class="ed-quiz"><h3>Preguntas del bloque final '
+            + '<span class="ed-quiz-count">' + t.quiz.length + ' pregunta(s)</span>'
+            + '<button type="button" class="btn-ai-mini" data-topic="' + ti + '" data-mode="extra">+ Añadir 5 más con IA</button></h3>';
           t.quiz.forEach((q, qi) => {{
-            html += '<div class="ed-question"><strong>P' + (qi+1) + '.</strong> ';
-            html += '<input type="text" class="ed-q-text" data-topic="' + ti + '" data-quiz="' + qi + '" data-field="text" value="' + escapeHtml(q.text) + '">';
-            q.options.forEach((opt, oi) => {{
-              const isCorrect = (oi === q.correct_index);
-              html += '<div class="ed-opt"><input type="radio" name="correct_' + ti + '_' + qi + '" data-topic="' + ti + '" data-quiz="' + qi + '" data-correct="' + oi + '" ' + (isCorrect ? 'checked' : '') + '>';
-              html += '<input type="text" data-topic="' + ti + '" data-quiz="' + qi + '" data-opt="' + oi + '" value="' + escapeHtml(opt) + '"></div>';
-            }});
-            if (q.explanation != null) {{
-              html += '<label class="ed-expl">Explicación<input type="text" data-topic="' + ti + '" data-quiz="' + qi + '" data-field="explanation" value="' + escapeHtml(q.explanation || '') + '"></label>';
-            }}
-            html += '<button type="button" class="btn-tiny btn-del-q" data-topic="' + ti + '" data-quiz="' + qi + '">🗑 Borrar pregunta</button>';
-            html += '</div>';
+            html += renderFinalQuestion(ti, qi, q);
           }});
+          html += '<div class="ed-quiz-add">';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="multiple_choice">+ Pregunta tipo test</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="true_false">+ Verdadero/Falso</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="fill_blank">+ Hueco</button>';
+          html += '</div>';
           html += '</div>';
         }} else {{
-          // Tema SIN quiz: ofrecer generación con IA
+          // Tema SIN quiz: ofrecer generación con IA + botones de añadir manual
           html += '<div class="ed-quiz ed-quiz-empty">';
-          html += '<h3>Preguntas del quiz</h3>';
-          html += '<p style="color:var(--ink-mute);font-size:0.9rem;margin-bottom:0.7rem;">Este tema todavía no tiene quiz. Puedes generar 5 preguntas a partir del contenido con IA.</p>';
+          html += '<h3>Preguntas del bloque final</h3>';
+          html += '<p style="color:var(--ink-mute);font-size:0.9rem;margin-bottom:0.7rem;">Este tema todavía no tiene preguntas en el bloque final. Puedes generar 5 preguntas con IA, o añadirlas manualmente.</p>';
           html += '<button type="button" class="btn-ai" data-topic="' + ti + '" data-mode="new">🤖 Generar 5 preguntas con IA</button>';
+          html += '<div class="ed-quiz-add" style="margin-top:0.6rem;">';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="multiple_choice">+ Pregunta tipo test</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="true_false">+ Verdadero/Falso</button>';
+          html += '<button type="button" class="btn-struct btn-mini" data-action="q-add" data-topic="' + ti + '" data-qtype="fill_blank">+ Hueco</button>';
+          html += '</div>';
           html += '</div>';
         }}
         html += '</div>';
@@ -2568,36 +3861,44 @@ def course_edit(token):
             alert('Error: ' + e.message);
           }}
         }});
-      // ----- Botón TTS del curso -----
+      // ----- Botón TTS del curso (v0.5.11: async con polling) -----
       bindAct('tts', async (btn) => {{
-          if (!confirm('Esto generará un archivo de audio por cada subapartado del curso. Puede tardar varios minutos. ¿Continuar?')) return;
+          if (!confirm('Esto generará un archivo de audio por cada subapartado del curso. Puede tardar varios minutos.\\n\\nVerás una barra de progreso. ¿Continuar?')) return;
           collectChanges();
-          // El backend modifica directamente structure.json y devuelve métricas.
-          // Tras la llamada, recargamos la estructura para reflejar los nuevos bloques [AUDIO].
-          btn.disabled = true;
-          const orig = btn.textContent;
-          btn.textContent = '⏳ Generando audios… (puede tardar)';
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/tts', {{
               method: 'POST',
               headers: {{'Content-Type': 'application/json'}},
               body: JSON.stringify({{}}),
             }});
-            const data = await r.json();
-            if (!r.ok) {{ alert('Error TTS: ' + (data.error || 'desconocido')); return; }}
+            const launch = await r.json();
+            if (!r.ok) {{ alert('Error TTS: ' + (launch.error || 'desconocido')); return; }}
+            const finalResult = await runJobWithProgress(
+              launch.job_id, launch.total,
+              '🔊 Generando narraciones TTS',
+              'Procesando ' + launch.total + ' subapartado(s)...'
+            );
+            if (!finalResult) return;
+            const s = finalResult.result || {{}};
             // Recargar la estructura desde el servidor (el backend la actualizó)
             const r2 = await fetch('/api/curso/' + TOKEN + '/structure');
             if (r2.ok) {{
               course = await r2.json();
+              courseSnapshot = JSON.parse(JSON.stringify(course));
+              dirty = false;
               render();
-              const errMsg = data.errors && data.errors.length ? ' (' + data.errors.length + ' errores)' : '';
-              markDirty(); setStatus('✓ ' + data.generated + ' narraciones generadas' + errMsg + '. Guarda para que se incluyan en el SCORM.');
             }}
+            let msg = '✓ Narraciones TTS generadas:\\n\\n';
+            msg += '  • ' + (s.generated || 0) + ' audios creados\\n';
+            if (s.skipped) msg += '  • ' + s.skipped + ' subapartados vacíos (saltados)\\n';
+            if (s.errors && s.errors.length) {{
+              msg += '  • ⚠ ' + s.errors.length + ' con error\\n';
+              msg += '\\nPrimeros errores:\\n' + s.errors.slice(0,3).join('\\n');
+            }}
+            alert(msg);
+            setStatus('✓ ' + (s.generated || 0) + ' narraciones generadas. Pulsa "💾 Guardar y reempaquetar" para incluirlas en el SCORM final.');
           }} catch (e) {{
             alert('Error: ' + e.message);
-          }} finally {{
-            btn.disabled = false;
-            btn.textContent = orig;
           }}
         }});
       // ============================================================
@@ -2696,6 +3997,16 @@ def course_edit(token):
           const list = (data.files || []).map(f => '• ' + f).join('\\n');
           alert('✓ Banco Aiken extendido generado:\\n\\n' + list + '\\n\\nLos archivos están en la carpeta del curso (aiken_extendido/). Cuando guardes el curso se incluirán en el ZIP descargable.');
           setStatus('✓ ' + (data.files || []).length + ' bancos Aiken extendidos generados.');
+        }});
+      // ----- DESCARGAR BANCO AIKEN COMO ZIP APARTE (v0.5.11) -----
+      bindAct('download-aiken', async (btn) => {{
+          // Disparar la descarga directa
+          window.location.href = '/api/curso/' + TOKEN + '/aiken-zip';
+        }});
+      // ----- SUBIR A MOODLE (v0.5.15) -----
+      bindAct('moodle-upload', async (btn) => {{
+          // Abre el modal de configuración + subida
+          openMoodleDialog();
         }});
       // ----- EXPORT IMS CONTENT PACKAGE -----
       bindAct('export-imscp', async (btn) => {{
@@ -3389,6 +4700,93 @@ def course_edit(token):
               return;
             }}
           }}
+          // v0.5.13: handlers de inline_quiz (preguntas de repaso por subapartado)
+          else if (a === 'iq-add') {{
+            const subId = btn.dataset.subid;
+            const qtype = btn.dataset.qtype || 'multiple_choice';
+            const topic = course.topics[ti];
+            topic.inline_quiz = topic.inline_quiz || {{}};
+            topic.inline_quiz[subId] = topic.inline_quiz[subId] || [];
+            const newQ = {{ text: '', qtype: qtype, correct_index: 0, explanation: '' }};
+            if (qtype === 'multiple_choice') {{
+              newQ.options = ['Opción A', 'Opción B', 'Opción C', 'Opción D'];
+            }} else if (qtype === 'true_false') {{
+              newQ.options = ['Verdadero', 'Falso'];
+            }} else if (qtype === 'fill_blank') {{
+              newQ.options = [''];
+              newQ.text = 'La capital de España es ___';
+            }}
+            topic.inline_quiz[subId].push(newQ);
+          }} else if (a === 'iq-del') {{
+            const subId = btn.dataset.subid;
+            const qi = parseInt(btn.dataset.iq);
+            const topic = course.topics[ti];
+            if (!confirm('¿Borrar esta pregunta de repaso?')) return;
+            if (topic.inline_quiz && topic.inline_quiz[subId]) {{
+              topic.inline_quiz[subId].splice(qi, 1);
+              if (topic.inline_quiz[subId].length === 0) {{
+                delete topic.inline_quiz[subId];
+              }}
+            }}
+          }} else if (a === 'iq-opt-add') {{
+            const subId = btn.dataset.subid;
+            const qi = parseInt(btn.dataset.iq);
+            const q = course.topics[ti].inline_quiz[subId][qi];
+            q.options = q.options || [];
+            q.options.push('Nueva opción');
+          }} else if (a === 'iq-opt-del') {{
+            const subId = btn.dataset.subid;
+            const qi = parseInt(btn.dataset.iq);
+            const oi = parseInt(btn.dataset.iqOption);
+            const q = course.topics[ti].inline_quiz[subId][qi];
+            if (q.options && q.options.length > 2) {{
+              q.options.splice(oi, 1);
+              if (q.correct_index >= q.options.length) q.correct_index = 0;
+              else if (q.correct_index > oi) q.correct_index--;
+            }} else {{
+              alert('Debe haber al menos 2 opciones.');
+              return;
+            }}
+          }}
+          // v0.5.14: handlers del quiz final (parity con inline_quiz)
+          else if (a === 'q-add') {{
+            const qtype = btn.dataset.qtype || 'multiple_choice';
+            const topic = course.topics[ti];
+            topic.quiz = topic.quiz || [];
+            const newQ = {{ text: '', qtype: qtype, correct_index: 0, explanation: '' }};
+            if (qtype === 'multiple_choice') {{
+              newQ.options = ['Opción A', 'Opción B', 'Opción C', 'Opción D'];
+            }} else if (qtype === 'true_false') {{
+              newQ.options = ['Verdadero', 'Falso'];
+            }} else if (qtype === 'fill_blank' || qtype === 'fill_in') {{
+              newQ.options = [''];
+              newQ.text = 'Completa: la respuesta es ___';
+              newQ.qtype = 'fill_blank';
+            }}
+            topic.quiz.push(newQ);
+          }} else if (a === 'q-del') {{
+            const qi = parseInt(btn.dataset.quiz);
+            if (!confirm('¿Borrar esta pregunta del bloque final?')) return;
+            const topic = course.topics[ti];
+            if (topic.quiz) topic.quiz.splice(qi, 1);
+          }} else if (a === 'q-opt-add') {{
+            const qi = parseInt(btn.dataset.quiz);
+            const q = course.topics[ti].quiz[qi];
+            q.options = q.options || [];
+            q.options.push('Nueva opción');
+          }} else if (a === 'q-opt-del') {{
+            const qi = parseInt(btn.dataset.quiz);
+            const oi = parseInt(btn.dataset.opt);
+            const q = course.topics[ti].quiz[qi];
+            if (q.options && q.options.length > 2) {{
+              q.options.splice(oi, 1);
+              if (q.correct_index >= q.options.length) q.correct_index = 0;
+              else if (q.correct_index > oi) q.correct_index--;
+            }} else {{
+              alert('Debe haber al menos 2 opciones.');
+              return;
+            }}
+          }}
 
           renumberTopics();
           markDirty();
@@ -3407,6 +4805,114 @@ def course_edit(token):
         example: 'EJEMPLO',
       }};
       return labels[t] || t;
+    }}
+
+    // v0.5.13: render de una pregunta de repaso (inline_quiz)
+    function renderInlineQuiz(ti, si, subId, qi, q) {{
+      const qtype = q.qtype || 'multiple_choice';
+      const qtypeLabel = {{
+        multiple_choice: '🅰 Tipo test',
+        true_false: '✓✗ Verdadero/Falso',
+        fill_blank: '📝 Hueco',
+      }}[qtype] || qtype;
+      const dataAttrs = 'data-topic="' + ti + '" data-sub="' + si + '" data-subid="' + escapeHtml(subId) + '" data-iq="' + qi + '"';
+      let h = '<div class="ed-iq-item" ' + dataAttrs + '>';
+      h += '<div class="ed-iq-head">';
+      h += '<span class="ed-iq-type">' + qtypeLabel + '</span>';
+      h += '<button type="button" class="btn-struct btn-mini btn-del" data-action="iq-del" ' + dataAttrs + ' title="Borrar pregunta">🗑</button>';
+      h += '</div>';
+      // Pregunta
+      h += '<label class="ed-iq-label">Pregunta:</label>';
+      h += '<textarea class="ed-iq-text" data-iq-field="text" ' + dataAttrs + ' rows="2">' + escapeHtml(q.text || '') + '</textarea>';
+      // Opciones según el tipo
+      if (qtype === 'multiple_choice') {{
+        h += '<label class="ed-iq-label">Opciones (marca la correcta):</label>';
+        h += '<div class="ed-iq-opts">';
+        (q.options || []).forEach((opt, oi) => {{
+          const checked = (q.correct_index === oi) ? 'checked' : '';
+          h += '<div class="ed-iq-opt-row">';
+          h += '<input type="radio" name="iq_' + ti + '_' + si + '_' + qi + '" data-iq-correct="' + oi + '" ' + dataAttrs + ' ' + checked + '>';
+          h += '<input type="text" data-iq-field="option" data-iq-option="' + oi + '" ' + dataAttrs + ' value="' + escapeHtml(opt) + '">';
+          h += '<button type="button" class="btn-struct btn-mini btn-del" data-action="iq-opt-del" data-iq-option="' + oi + '" ' + dataAttrs + ' title="Borrar opción">🗑</button>';
+          h += '</div>';
+        }});
+        h += '<button type="button" class="btn-struct btn-mini" data-action="iq-opt-add" ' + dataAttrs + '>+ Añadir opción</button>';
+        h += '</div>';
+      }} else if (qtype === 'true_false') {{
+        h += '<label class="ed-iq-label">Respuesta correcta:</label>';
+        const tfOpts = q.options && q.options.length ? q.options : ['Verdadero', 'Falso'];
+        h += '<div class="ed-iq-opts">';
+        tfOpts.forEach((opt, oi) => {{
+          const checked = (q.correct_index === oi) ? 'checked' : '';
+          h += '<label class="ed-iq-tf-row"><input type="radio" name="iq_' + ti + '_' + si + '_' + qi + '" data-iq-correct="' + oi + '" ' + dataAttrs + ' ' + checked + '> ' + escapeHtml(opt) + '</label>';
+        }});
+        h += '</div>';
+      }} else if (qtype === 'fill_blank') {{
+        h += '<label class="ed-iq-label">Respuesta correcta (escribe el texto que debe rellenar el hueco):</label>';
+        const ans = (q.options && q.options[q.correct_index || 0]) || '';
+        h += '<input type="text" data-iq-field="fillblank" ' + dataAttrs + ' value="' + escapeHtml(ans) + '">';
+        h += '<p class="ed-iq-hint">En el texto de la pregunta, usa ___ (tres guiones bajos) para marcar el hueco.</p>';
+      }}
+      // Explicación
+      h += '<label class="ed-iq-label">Explicación (se muestra tras responder):</label>';
+      h += '<textarea class="ed-iq-explain" data-iq-field="explanation" ' + dataAttrs + ' rows="1">' + escapeHtml(q.explanation || '') + '</textarea>';
+      h += '</div>';
+      return h;
+    }}
+
+    // v0.5.14: render de una pregunta del quiz final (parity con renderInlineQuiz)
+    function renderFinalQuestion(ti, qi, q) {{
+      const qtype = q.qtype || 'multiple_choice';
+      const qtypeLabel = {{
+        multiple_choice: '🅰 Tipo test',
+        true_false: '✓✗ Verdadero/Falso',
+        fill_blank: '📝 Hueco',
+        fill_in: '📝 Hueco',
+      }}[qtype] || qtype;
+      const dataAttrs = 'data-topic="' + ti + '" data-quiz="' + qi + '"';
+      let h = '<div class="ed-question ed-q-item" ' + dataAttrs + '>';
+      h += '<div class="ed-q-head">';
+      h += '<strong>P' + (qi+1) + '.</strong>';
+      h += '<span class="ed-q-type">' + qtypeLabel + '</span>';
+      h += '<button type="button" class="btn-struct btn-mini btn-del" data-action="q-del" ' + dataAttrs + ' title="Borrar pregunta">🗑</button>';
+      h += '</div>';
+      // Pregunta
+      h += '<label class="ed-q-label">Pregunta:</label>';
+      h += '<textarea class="ed-q-textarea" data-field="text" ' + dataAttrs + ' rows="2">' + escapeHtml(q.text || '') + '</textarea>';
+      // Opciones según el tipo
+      if (qtype === 'multiple_choice') {{
+        h += '<label class="ed-q-label">Opciones (marca la correcta):</label>';
+        h += '<div class="ed-q-opts">';
+        (q.options || []).forEach((opt, oi) => {{
+          const checked = (q.correct_index === oi) ? 'checked' : '';
+          h += '<div class="ed-q-opt-row">';
+          h += '<input type="radio" name="correct_' + ti + '_' + qi + '" data-correct="' + oi + '" ' + dataAttrs + ' ' + checked + '>';
+          h += '<input type="text" data-opt="' + oi + '" ' + dataAttrs + ' value="' + escapeHtml(opt) + '">';
+          h += '<button type="button" class="btn-struct btn-mini btn-del" data-action="q-opt-del" data-opt="' + oi + '" ' + dataAttrs + ' title="Borrar opción">🗑</button>';
+          h += '</div>';
+        }});
+        h += '<button type="button" class="btn-struct btn-mini" data-action="q-opt-add" ' + dataAttrs + '>+ Añadir opción</button>';
+        h += '</div>';
+      }} else if (qtype === 'true_false') {{
+        h += '<label class="ed-q-label">Respuesta correcta:</label>';
+        const tfOpts = q.options && q.options.length ? q.options : ['Verdadero', 'Falso'];
+        h += '<div class="ed-q-opts">';
+        tfOpts.forEach((opt, oi) => {{
+          const checked = (q.correct_index === oi) ? 'checked' : '';
+          h += '<label class="ed-q-tf-row"><input type="radio" name="correct_' + ti + '_' + qi + '" data-correct="' + oi + '" ' + dataAttrs + ' ' + checked + '> ' + escapeHtml(opt) + '</label>';
+        }});
+        h += '</div>';
+      }} else if (qtype === 'fill_blank' || qtype === 'fill_in') {{
+        h += '<label class="ed-q-label">Respuesta correcta (texto que debe rellenar el hueco):</label>';
+        const ans = (q.options && q.options[q.correct_index || 0]) || '';
+        h += '<input type="text" data-field="fillblank" ' + dataAttrs + ' value="' + escapeHtml(ans) + '">';
+        h += '<p class="ed-q-hint">En el texto de la pregunta, usa ___ (tres guiones bajos) para marcar el hueco.</p>';
+      }}
+      // Explicación
+      h += '<label class="ed-q-label">Explicación (se muestra tras responder):</label>';
+      h += '<textarea class="ed-q-textarea" data-field="explanation" ' + dataAttrs + ' rows="1">' + escapeHtml(q.explanation || '') + '</textarea>';
+      h += '</div>';
+      return h;
     }}
 
     function blockEditor(ti, si, bi, b) {{
@@ -3428,7 +4934,6 @@ def course_edit(token):
       }}
       if (['image', 'video', 'audio', 'embed', 'resource', 'download'].includes(t)) {{
         const placeholder = (t === 'embed') ? 'URL de YouTube/Vimeo' : 'archivo en /recursos o URL';
-        // Si es imagen, añadimos botones "Sugerir alt" y "Comprobar copyright"
         let altBtn = '';
         let copyBtn = '';
         if (t === 'image') {{
@@ -3439,10 +4944,22 @@ def course_edit(token):
             copyBtn = '<button type="button" class="btn-ai-mini ed-copyright-ia" ' + dataAttrs + ' data-filename="' + escapeHtml(src) + '" title="Evaluar riesgo de copyright con IA de visión">⚠️ Comprobar copyright</button>';
           }}
         }}
+        // v0.5.13: campos separados alt-text (accesibilidad) y caption (pie visible)
+        const captionVal = (b.extras && b.extras.caption) || '';
         return '<div class="ed-multimedia">' +
-          '<input type="text" ' + dataAttrs + ' data-field="text" placeholder="Pie/Título (alt-text para imágenes)" value="' + escapeHtml(b.text || '') + '">' +
-          '<input type="text" ' + dataAttrs + ' data-extra="src" placeholder="' + placeholder + '" value="' + escapeHtml((b.extras && b.extras.src) || '') + '">' +
-          altBtn + copyBtn +
+          '<div class="ed-mm-row">' +
+            '<label class="ed-mm-lbl">Alt-text:</label>' +
+            '<input type="text" ' + dataAttrs + ' data-field="text" placeholder="Descripción accesible (para lectores de pantalla, WCAG)" value="' + escapeHtml(b.text || '') + '">' +
+          '</div>' +
+          '<div class="ed-mm-row">' +
+            '<label class="ed-mm-lbl">Pie:</label>' +
+            '<input type="text" ' + dataAttrs + ' data-extra="caption" placeholder="Texto visible bajo la imagen (opcional, si se deja vacío se usa el alt)" value="' + escapeHtml(captionVal) + '">' +
+          '</div>' +
+          '<div class="ed-mm-row">' +
+            '<label class="ed-mm-lbl">Archivo:</label>' +
+            '<input type="text" ' + dataAttrs + ' data-extra="src" placeholder="' + placeholder + '" value="' + escapeHtml((b.extras && b.extras.src) || '') + '">' +
+          '</div>' +
+          '<div class="ed-mm-buttons">' + altBtn + copyBtn + '</div>' +
           '</div>';
       }}
       // Texto largo: textarea
@@ -3496,19 +5013,49 @@ def course_edit(token):
             if (el.dataset.extra === 'src') b.extras.file = el.value;
           }}
         }}
-        // Quiz
+        // Quiz final
         if (el.dataset.quiz !== undefined) {{
           const qi = parseInt(el.dataset.quiz);
+          if (!t.quiz || !t.quiz[qi]) return;
           const q = t.quiz[qi];
-          if (!q) return;
           if (el.dataset.field) {{
-            q[el.dataset.field] = el.value;
+            // v0.5.14: campo fillblank (caso especial para tipo hueco)
+            if (el.dataset.field === 'fillblank') {{
+              q.options = [el.value];
+              q.correct_index = 0;
+            }} else {{
+              q[el.dataset.field] = el.value;
+            }}
           }}
           if (el.dataset.opt !== undefined) {{
+            q.options = q.options || [];
             q.options[parseInt(el.dataset.opt)] = el.value;
           }}
           if (el.dataset.correct !== undefined && el.checked) {{
             q.correct_index = parseInt(el.dataset.correct);
+          }}
+        }}
+        // v0.5.13: inline_quiz (preguntas de repaso por subapartado)
+        if (el.dataset.iq !== undefined) {{
+          const subId = el.dataset.subid;
+          const qi = parseInt(el.dataset.iq);
+          t.inline_quiz = t.inline_quiz || {{}};
+          t.inline_quiz[subId] = t.inline_quiz[subId] || [];
+          const q = t.inline_quiz[subId][qi];
+          if (!q) return;
+          const f = el.dataset.iqField;
+          if (f === 'text') q.text = el.value;
+          else if (f === 'explanation') q.explanation = el.value;
+          else if (f === 'option') {{
+            const oi = parseInt(el.dataset.iqOption);
+            q.options = q.options || [];
+            q.options[oi] = el.value;
+          }} else if (f === 'fillblank') {{
+            q.options = [el.value];
+            q.correct_index = 0;
+          }}
+          if (el.dataset.iqCorrect !== undefined && el.checked) {{
+            q.correct_index = parseInt(el.dataset.iqCorrect);
           }}
         }}
       }});
@@ -3603,6 +5150,65 @@ def course_edit(token):
     .ed-opt input[type=text] {{ flex: 1; }}
     .ed-expl {{ display: block; margin-top: 0.5rem; font-size: 0.78rem; color: var(--ink-mute); font-weight: 600; }}
     .ed-expl input {{ margin-top: 0.3rem; }}
+    /* v0.5.14: nuevo render de quiz final con parity con inline_quiz */
+    .ed-quiz-count {{
+      font-size: 0.78rem; color: #1e40af;
+      background: white; padding: 0.15rem 0.6rem;
+      border-radius: 12px; font-weight: 600;
+    }}
+    .ed-quiz-add {{
+      display: flex; flex-wrap: wrap; gap: 0.4rem;
+      margin-top: 0.6rem; padding-top: 0.6rem;
+      border-top: 1px solid var(--paper-deep);
+    }}
+    .ed-q-item {{
+      background: white;
+      padding: 0.85rem 1rem;
+      border-radius: 6px;
+      margin: 0.5rem 0;
+      border: 1px solid var(--paper-deep);
+    }}
+    .ed-q-head {{
+      display: flex; align-items: center; gap: 0.6rem;
+      margin-bottom: 0.4rem;
+    }}
+    .ed-q-head .btn-del {{ margin-left: auto; }}
+    .ed-q-type {{
+      background: #dbeafe; color: #1e40af;
+      padding: 0.15rem 0.6rem; border-radius: 12px;
+      font-size: 0.75rem; font-weight: 700;
+    }}
+    .ed-q-label {{
+      display: block;
+      font-size: 0.78rem; color: var(--ink-mute);
+      font-weight: 600; margin: 0.5rem 0 0.2rem;
+    }}
+    .ed-q-textarea {{
+      width: 100%; padding: 0.4rem 0.6rem;
+      border: 1px solid var(--paper-deep);
+      border-radius: 4px; font-family: inherit; font-size: 0.85rem;
+      resize: vertical;
+    }}
+    .ed-q-opts {{
+      display: flex; flex-direction: column; gap: 0.3rem;
+      margin: 0.3rem 0;
+    }}
+    .ed-q-opt-row {{
+      display: flex; gap: 0.4rem; align-items: center;
+    }}
+    .ed-q-opt-row input[type=text] {{
+      flex: 1; padding: 0.3rem 0.5rem;
+      border: 1px solid var(--paper-deep); border-radius: 4px;
+      font-size: 0.85rem;
+    }}
+    .ed-q-tf-row {{
+      display: flex; gap: 0.5rem; align-items: center;
+      font-size: 0.88rem;
+    }}
+    .ed-q-hint {{
+      font-size: 0.75rem; color: var(--ink-mute);
+      font-style: italic; margin-top: 0.2rem;
+    }}
     .ed-readonly {{ color: var(--ink-mute); font-size: 0.85rem; }}
     .ed-actions {{
       display: flex;
@@ -3800,11 +5406,249 @@ def course_edit(token):
 
     /* Multimedia con dos campos en columna */
     .ed-multimedia {{ display: flex; flex-direction: column; gap: 0.3rem; flex: 1; }}
+    /* v0.5.13: cada campo del multimedia con label inline */
+    .ed-mm-row {{
+      display: flex; gap: 0.5rem; align-items: center;
+    }}
+    .ed-mm-row input[type=text] {{
+      flex: 1; padding: 0.35rem 0.55rem;
+      border: 1px solid var(--paper-deep); border-radius: 4px;
+      font-size: 0.85rem;
+    }}
+    .ed-mm-lbl {{
+      min-width: 65px;
+      font-size: 0.75rem; font-weight: 600; color: var(--ink-mute);
+      text-align: right;
+    }}
+    .ed-mm-buttons {{ display: flex; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.2rem; }}
 
     /* Grupos en el desplegable de añadir bloque */
     .ed-add-group {{ display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-bottom: 0.3rem; padding-bottom: 0.3rem; border-bottom: 1px dashed var(--paper-deep); }}
     .ed-add-group:last-child {{ border-bottom: none; }}
     .ed-add-label {{ font-size: 0.72rem; color: var(--ink-mute); font-weight: 600; min-width: 75px; }}
+
+    /* v0.5.13: panel de preguntas de repaso (inline_quiz) por subapartado */
+    .ed-inline-quiz {{
+      margin: 1rem 0 0.3rem;
+      padding: 0.85rem 1rem;
+      background: #fef3c7;
+      border-left: 4px solid #f59e0b;
+      border-radius: 6px;
+    }}
+    .ed-inline-quiz-head {{
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.5rem;
+    }}
+    .ed-inline-quiz-head strong {{ color: #78350f; font-size: 0.9rem; }}
+    .ed-inline-quiz-count {{
+      font-size: 0.78rem; color: #92400e;
+      background: white; padding: 0.15rem 0.6rem;
+      border-radius: 12px; font-weight: 600;
+    }}
+    .ed-inline-quiz-empty {{
+      font-size: 0.82rem; color: #92400e;
+      font-style: italic; margin: 0.4rem 0;
+    }}
+    .ed-inline-quiz-add {{
+      display: flex; flex-wrap: wrap; gap: 0.4rem;
+      margin-top: 0.6rem; padding-top: 0.5rem;
+      border-top: 1px solid rgba(146,64,14,0.2);
+    }}
+    .ed-iq-item {{
+      background: white;
+      padding: 0.7rem 0.9rem;
+      border-radius: 6px;
+      margin: 0.5rem 0;
+      border: 1px solid #fde68a;
+    }}
+    .ed-iq-head {{
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.4rem;
+    }}
+    .ed-iq-type {{
+      background: #fef3c7; color: #78350f;
+      padding: 0.15rem 0.6rem; border-radius: 12px;
+      font-size: 0.75rem; font-weight: 700;
+    }}
+    .ed-iq-label {{
+      display: block;
+      font-size: 0.78rem; color: var(--ink-mute);
+      font-weight: 600; margin: 0.5rem 0 0.2rem;
+    }}
+    .ed-iq-text, .ed-iq-explain {{
+      width: 100%; padding: 0.4rem 0.6rem;
+      border: 1px solid var(--paper-deep);
+      border-radius: 4px; font-family: inherit; font-size: 0.85rem;
+      resize: vertical;
+    }}
+    .ed-iq-opts {{
+      display: flex; flex-direction: column; gap: 0.3rem;
+      margin: 0.3rem 0;
+    }}
+    .ed-iq-opt-row {{
+      display: flex; gap: 0.4rem; align-items: center;
+    }}
+    .ed-iq-opt-row input[type=text] {{
+      flex: 1; padding: 0.3rem 0.5rem;
+      border: 1px solid var(--paper-deep); border-radius: 4px;
+      font-size: 0.85rem;
+    }}
+    .ed-iq-tf-row {{
+      display: flex; gap: 0.5rem; align-items: center;
+      font-size: 0.88rem;
+    }}
+    .ed-iq-hint {{
+      font-size: 0.75rem; color: var(--ink-mute);
+      font-style: italic; margin-top: 0.2rem;
+    }}
+
+    /* v0.5.15: Modal Subir a Moodle */
+    .moodle-dialog-bg {{
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 23, 42, 0.65);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    }}
+    .moodle-dialog {{
+      background: white;
+      border-radius: 12px;
+      width: 92%;
+      max-width: 720px;
+      max-height: 92vh;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 12px 50px rgba(0,0,0,0.3);
+    }}
+    .moodle-dialog-head {{
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 1.4rem;
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+      color: white;
+    }}
+    .moodle-dialog-head h3 {{ margin: 0; font-size: 1.15rem; }}
+    .moodle-close {{
+      background: rgba(255,255,255,0.2); color: white;
+      border: 0; width: 28px; height: 28px; border-radius: 50%;
+      font-size: 1.4rem; line-height: 1; cursor: pointer;
+    }}
+    .moodle-close:hover {{ background: rgba(255,255,255,0.35); }}
+    .moodle-dialog-body {{
+      padding: 1.2rem 1.5rem;
+      overflow-y: auto;
+      flex: 1;
+    }}
+    .moodle-dialog-body h4 {{
+      margin: 1.2rem 0 0.6rem;
+      color: #c2410c;
+      font-size: 0.95rem;
+      border-bottom: 1px solid #fed7aa;
+      padding-bottom: 0.3rem;
+    }}
+    .moodle-help {{
+      background: #fef3c7;
+      border-left: 3px solid #f59e0b;
+      padding: 0.7rem 1rem;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      color: #78350f;
+    }}
+    .moodle-help ol {{ margin: 0.4rem 0 0; padding-left: 1.4rem; }}
+    .moodle-help li {{ margin: 0.25rem 0; }}
+    .moodle-help code {{
+      background: rgba(0,0,0,0.08); padding: 0.05rem 0.3rem;
+      border-radius: 3px; font-size: 0.85em;
+    }}
+    .moodle-form {{
+      display: flex; flex-direction: column; gap: 0.5rem;
+    }}
+    .moodle-form label {{
+      display: flex; flex-direction: column;
+      font-size: 0.82rem; font-weight: 600; color: var(--ink, #1f2937);
+    }}
+    .moodle-form input {{
+      margin-top: 0.2rem;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid var(--paper-deep, #d4d4d8);
+      border-radius: 5px; font-size: 0.9rem;
+    }}
+    .moodle-form-actions {{
+      display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;
+    }}
+    .moodle-test-result {{
+      padding: 0.7rem 0.9rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+      line-height: 1.4;
+    }}
+    .moodle-test-result.loading {{ background: #f3f4f6; color: #4b5563; }}
+    .moodle-test-result.ok {{ background: #d1fae5; color: #065f46; }}
+    .moodle-test-result.err {{ background: #fee2e2; color: #b91c1c; }}
+    .moodle-units-list {{
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 0.6rem;
+      max-height: 200px;
+      overflow-y: auto;
+    }}
+    .moodle-unit-row {{
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 0.6rem;
+      align-items: center;
+      padding: 0.3rem 0;
+      font-size: 0.88rem;
+    }}
+    .moodle-unit-size {{ color: #6b7280; font-size: 0.8rem; }}
+    .moodle-upload-actions {{
+      margin: 1rem 0 0.5rem;
+      display: flex; justify-content: flex-end;
+    }}
+    .moodle-progress {{
+      width: 100%; height: 8px;
+      background: #e5e7eb; border-radius: 4px;
+      overflow: hidden; margin: 0.4rem 0;
+    }}
+    .moodle-progress-bar {{
+      height: 100%; background: linear-gradient(90deg, #10b981, #059669);
+      transition: width 0.3s;
+    }}
+    .moodle-summary {{
+      background: #ecfeff;
+      border-left: 3px solid #06b6d4;
+      padding: 0.7rem 1rem;
+      border-radius: 4px;
+      margin: 0.6rem 0;
+    }}
+    .moodle-summary .moodle-warn {{
+      background: #fef3c7;
+      padding: 0.6rem;
+      border-radius: 4px;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+      color: #78350f;
+    }}
+    .moodle-results-table {{
+      width: 100%; border-collapse: collapse;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+    }}
+    .moodle-results-table th, .moodle-results-table td {{
+      padding: 0.4rem 0.6rem;
+      text-align: left;
+      border-bottom: 1px solid #e5e7eb;
+    }}
+    .moodle-results-table th {{ background: #f9fafb; font-weight: 600; }}
+    .moodle-results-table code {{ font-size: 0.8em; color: #6b7280; }}
+    .ed-act-moodle-upload {{
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%) !important;
+      color: white !important;
+      border: 0 !important;
+    }}
+    .ed-act-moodle-upload:hover {{
+      background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%) !important;
+    }}
 
     /* =========================================================
        FASE 3 (v0.5): UI para etiquetas y asistente IA avanzado
@@ -4308,13 +6152,23 @@ def course_edit(token):
 @app.route("/api/curso/<token>/structure")
 @login_required
 def course_structure_get(token):
-    """Devuelve el JSON de la estructura editable."""
+    """Devuelve el JSON de la estructura editable.
+    
+    v0.5.16: dueños y destinatarios de share (cualquier permiso) pueden leer.
+    """
     user = current_user()
     with db() as conn:
         row = conn.execute(
             "SELECT zip_path FROM courses WHERE token = ? AND user_id = ?",
             (token, user["id"]),
         ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT c.zip_path FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ?""",
+                (token, user["id"]),
+            ).fetchone()
     if not row:
         abort(404)
     structure_path = Path(row["zip_path"]).parent / "structure.json"
@@ -4328,13 +6182,23 @@ def course_structure_get(token):
 @app.route("/api/curso/<token>/save", methods=["POST"])
 @login_required
 def course_structure_save(token):
-    """Recibe la estructura editada, la persiste y reempaqueta el SCORM."""
+    """Recibe la estructura editada, la persiste y reempaqueta el SCORM.
+    
+    v0.5.16: dueños y destinatarios de share con permiso 'edit' pueden guardar.
+    """
     user = current_user()
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM courses WHERE token = ? AND user_id = ?",
             (token, user["id"]),
         ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT c.* FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ? AND cs.permission = 'edit'""",
+                (token, user["id"]),
+            ).fetchone()
     if not row:
         abort(404)
     job_dir = Path(row["zip_path"]).parent
@@ -4444,65 +6308,87 @@ def course_structure_save(token):
 
     # Reempaquetar SCORM
     output_dir = job_dir / "salida"
-    # Limpiar SCORM antiguos para no acumular
-    scorm_dir = output_dir / "scorm"
-    if scorm_dir.exists():
-        shutil.rmtree(scorm_dir, ignore_errors=True)
-    recursos_dir = output_dir / "recursos" if (output_dir / "recursos").exists() else None
-    try:
-        result = rebuild_from_structure(
-            course=course,
-            output_dir=output_dir,
-            theme=course.metadata.palette,
-            recursos_dir=recursos_dir,
-            generate_pdfs=False,
-            generate_aiken=False,
-        )
-    except Exception as e:
-        return jsonify({"error": f"Error al reempaquetar: {e}"}), 500
 
-    # v0.5.9: si el curso era modo BATCH, también actualizar cada unidad_NN_*/.
-    # rebuild_from_structure ya generó salida/scorm/T01_*.zip, T02_*.zip, ...
-    # Los copiamos a cada unidad_NN_*/scorm/ para que el ZIP descargado tenga
-    # las mejoras de IA aplicadas tanto en el SCORM consolidado como en los
-    # SCORM por unidad. Y actualizamos también el estructura_curso.json de cada
-    # unidad con los datos del topic correspondiente.
+    # v0.5.11: detectar si el curso fue generado en modo BATCH o SINGLE
+    # - batch: existen carpetas salida/unidad_NN_*/ cada una con sus recursos
+    # - single: existe salida/curso/ o salida/recursos/ centralizado
+    unit_dirs = sorted(output_dir.glob("unidad_*"))
+    is_batch = bool(unit_dirs)
+    single_dir = output_dir / "curso"
+    is_single_curso = (not is_batch) and single_dir.exists()
+
     import logging as _logging
-    _bg_logger = _logging.getLogger("scormbuilder.batch_rebuild")
+    _bg_logger = _logging.getLogger("scormbuilder.rebuild")
+
     batch_units_updated = 0
-    try:
-        unit_dirs = sorted(output_dir.glob("unidad_*"))
-        if unit_dirs:
+    rebuild_errors = []
+
+    if is_batch:
+        # MODO BATCH: regenerar cada unidad con sus recursos LOCALES
+        # (esto preserva las imágenes, que viven en cada unidad_NN_*/recursos/)
+        try:
             from scorm_builder.parser import CourseStructure as _CS
-            consolidated_scorm = output_dir / "scorm"
+            from scorm_builder.themes import (
+                get_theme, make_custom_theme, THEMES, Theme,
+            )
+            from scorm_builder.renderer import render_html
+            from scorm_builder.packager import build_scorm_package
+
+            # Resolver tema (custom o predefinido)
+            if (course.metadata.color_deep and course.metadata.color_primary
+                    and course.metadata.color_bright):
+                theme_obj = make_custom_theme(
+                    primary_deep=course.metadata.color_deep,
+                    primary=course.metadata.color_primary,
+                    primary_bright=course.metadata.color_bright,
+                )
+            else:
+                pal = course.metadata.palette
+                theme_obj = get_theme(pal if pal in THEMES else "azul")
+
+            htmls = render_html(course, theme_obj)
+            course_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", course.metadata.title.lower())[:40]
+
             for ti, topic in enumerate(course.topics):
                 idx_str = f"{ti+1:02d}"
                 matching = [d for d in unit_dirs if d.name.startswith(f"unidad_{idx_str}_")]
                 if not matching:
+                    rebuild_errors.append(f"Unidad {idx_str}: carpeta no encontrada")
                     continue
                 unit_dir = matching[0]
                 unit_scorm_dir = unit_dir / "scorm"
-                # Limpiar SCORM viejo y copiar el actualizado
+                unit_recursos = (unit_dir / "recursos") if (unit_dir / "recursos").exists() else None
+
+                # Limpiar y recrear scorm/ de esta unidad
                 if unit_scorm_dir.exists():
                     shutil.rmtree(unit_scorm_dir, ignore_errors=True)
                 unit_scorm_dir.mkdir(parents=True, exist_ok=True)
-                # El nuevo SCORM consolidado tiene salida/scorm/{course_slug}_T{NN}_*.zip
-                # build_all_topics genera el nombre con prefijo del slug del curso, así
-                # que usamos un patrón con * al principio para matchear cualquier slug.
-                tprefix = f"T{topic.number:02d}_"
-                if consolidated_scorm.exists():
-                    matching_zips = list(consolidated_scorm.glob(f"*{tprefix}*.zip"))
-                    for src_zip in matching_zips:
-                        try:
-                            shutil.copy2(src_zip, unit_scorm_dir / src_zip.name)
-                        except Exception:
-                            pass
-                    if matching_zips:
-                        batch_units_updated += 1
-                # Actualizar estructura_curso.json de la unidad
-                extras_dir = unit_dir / "extras"
-                extras_dir.mkdir(exist_ok=True)
+
+                if topic.number not in htmls:
+                    rebuild_errors.append(f"Tema {topic.number}: HTML no generado")
+                    continue
+
+                topic_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", topic.title.lower())[:40]
+                zip_name = f"{course_slug}_T{topic.number:02d}_{topic_slug}_scorm.zip"
+
                 try:
+                    build_scorm_package(
+                        topic=topic,
+                        html_content=htmls[topic.number],
+                        course_title=course.metadata.title,
+                        output_path=unit_scorm_dir / zip_name,
+                        recursos_dir=unit_recursos,    # ← recursos LOCALES de esta unidad
+                        mastery=course.metadata.mastery,
+                    )
+                    batch_units_updated += 1
+                except Exception as e:
+                    rebuild_errors.append(f"Tema {topic.number}: {e}")
+                    _bg_logger.warning(f"v0.5.11: build_scorm_package falló unidad {idx_str}: {e}")
+
+                # Actualizar estructura_curso.json local de la unidad
+                try:
+                    extras_dir = unit_dir / "extras"
+                    extras_dir.mkdir(exist_ok=True)
                     unit_course = _CS(
                         metadata=course.metadata,
                         topics=[topic],
@@ -4510,12 +6396,42 @@ def course_structure_save(token):
                     )
                     (extras_dir / "estructura_curso.json").write_text(
                         json.dumps(unit_course.to_dict(), ensure_ascii=False, indent=2),
-                        encoding="utf-8"
+                        encoding="utf-8",
                     )
                 except Exception as e:
-                    _bg_logger.warning(f"v0.5.9: estructura unidad {idx_str} no se pudo actualizar: {e}")
-    except Exception as e:
-        _bg_logger.warning(f"v0.5.9: regeneración batch fallida: {e}")
+                    _bg_logger.warning(f"v0.5.11: estructura unidad {idx_str}: {e}")
+        except Exception as e:
+            return jsonify({"error": f"Error reempaquetando modo batch: {e}"}), 500
+
+    else:
+        # MODO SINGLE: rebuild_from_structure con los recursos correctos
+        # Antes (v0.5.10) buscaba salida/recursos/ pero en single están en
+        # salida/curso/recursos/. Lo arreglamos aquí.
+        if is_single_curso and (single_dir / "recursos").exists():
+            recursos_dir = single_dir / "recursos"
+            # Limpiar scorm viejo dentro de salida/curso/scorm/
+            scorm_dir_single = single_dir / "scorm"
+            if scorm_dir_single.exists():
+                shutil.rmtree(scorm_dir_single, ignore_errors=True)
+            target_dir = single_dir
+        else:
+            # Fallback al comportamiento antiguo
+            scorm_dir = output_dir / "scorm"
+            if scorm_dir.exists():
+                shutil.rmtree(scorm_dir, ignore_errors=True)
+            recursos_dir = (output_dir / "recursos") if (output_dir / "recursos").exists() else None
+            target_dir = output_dir
+        try:
+            rebuild_from_structure(
+                course=course,
+                output_dir=target_dir,
+                theme=course.metadata.palette,
+                recursos_dir=recursos_dir,
+                generate_pdfs=False,
+                generate_aiken=False,
+            )
+        except Exception as e:
+            return jsonify({"error": f"Error al reempaquetar: {e}"}), 500
 
     # Reempaquetar el ZIP descargable
     final_zip = job_dir / f"curso_{token}.zip"
@@ -5989,13 +7905,30 @@ def _course_to_text(course_data: dict) -> str:
     return text
 
 
-def _load_course_for_user(token, user):
-    """Devuelve (row_BD, structure_path, structure_dict) o (None, None, None)."""
+def _load_course_for_user(token, user, require_edit=False):
+    """Devuelve (row_BD, structure_path, structure_dict) o (None, None, None).
+    
+    v0.5.12: ahora soporta cursos compartidos. Si el curso no pertenece al
+    usuario, intenta verificar si está compartido con él. Si require_edit=True,
+    solo permite si el permiso es 'edit'.
+    """
     with db() as conn:
         row = conn.execute(
             "SELECT * FROM courses WHERE token = ? AND user_id = ?",
             (token, user["id"]),
         ).fetchone()
+        if not row:
+            # Buscar si está compartido con este usuario
+            share = conn.execute(
+                """SELECT c.*, cs.permission FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ?""",
+                (token, user["id"]),
+            ).fetchone()
+            if share:
+                if require_edit and share["permission"] != "edit":
+                    return None, None, None
+                row = share
     if not row:
         return None, None, None
     structure_path = Path(row["zip_path"]).parent / "structure.json"
@@ -6343,9 +8276,10 @@ def course_ai_illustration(token):
 def course_tts(token):
     """Genera narraciones TTS para todos los subapartados del curso.
 
-    Devuelve {"generated": N, "skipped": M, "errors": [...]}
-    Los archivos se guardan como audio_T<n>_<m>.wav en la carpeta de recursos
-    y se referencian como bloque [AUDIO] al inicio del subapartado correspondiente.
+    v0.5.11: convertido a ASÍNCRONO con jobs en memoria. Devuelve {job_id}
+    inmediatamente; el frontend hace polling a /api/jobs/<id>. Esto evita
+    timeouts de nginx/gunicorn cuando hay muchos subapartados (10 unidades ×
+    5 subapartados = 50 audios pueden tardar 5+ minutos).
     """
     user = current_user()
     row, structure_path, course_data = _load_course_for_user(token, user)
@@ -6356,79 +8290,117 @@ def course_tts(token):
 
     try:
         from scorm_builder.tts import synthesize, subsection_to_text, tts_available
-        from scorm_builder.parser import (
-            CourseStructure, CourseMetadata, Topic, Subsection, Block, BlockType
-        )
     except ImportError as e:
         return jsonify({"error": f"Módulo TTS no disponible: {e}"}), 500
     if not tts_available():
-        return jsonify({"error": "pyttsx3 no instalado. Ejecuta: pip install pyttsx3"}), 400
+        return jsonify({"error": "pyttsx3 no instalado en el servidor."}), 400
+
+    # Contar subapartados totales para reportar progreso
+    total_subs = sum(
+        len(topic.get("subsections", []))
+        for topic in course_data.get("topics", [])
+    )
+    if total_subs == 0:
+        return jsonify({"error": "El curso no tiene subapartados"}), 400
+
+    snap_id = _save_snapshot(Path(row["zip_path"]).parent, label="pre_tts")
+    jid = _new_job("tts_all", token, total_subs)
+    _update_job(jid, snapshot_id=snap_id)
 
     job_dir = Path(row["zip_path"]).parent
-    recursos_dir = job_dir / "salida" / "recursos"
-    recursos_dir.mkdir(parents=True, exist_ok=True)
+    structure_path_str = str(structure_path)
 
-    generated = 0
-    skipped = 0
-    errors = []
+    def _tts_worker():
+        try:
+            from scorm_builder.tts import synthesize, subsection_to_text
+            # En modo batch, los audios van a las carpetas locales de cada unidad
+            # para que se incluyan en su SCORM. En single, a salida/curso/recursos/
+            output_dir = job_dir / "salida"
+            unit_dirs = sorted(output_dir.glob("unidad_*"))
+            is_batch = bool(unit_dirs)
+            single_dir = output_dir / "curso"
 
-    for ti, topic in enumerate(course_data.get("topics", [])):
-        for si, sub in enumerate(topic.get("subsections", [])):
-            # Reconstituir subsection mínimo en formato dataclass para tts.subsection_to_text
-            class _Sub:
-                pass
-            sub_obj = _Sub()
-            sub_obj.title = sub.get("title", "")
-            sub_obj.blocks = []
-            for b in sub.get("blocks", []):
-                blk = _Sub()
-                bt = b.get("type", "paragraph")
-                # bt como pseudo-enum: solo necesitamos .value
-                class _BT:
-                    def __init__(self, v): self.value = v
-                blk.type = _BT(bt)
-                blk.text = b.get("text", "")
-                blk.items = b.get("items", [])
-                sub_obj.blocks.append(blk)
-            text = subsection_to_text(sub_obj)
-            if not text.strip():
-                skipped += 1
-                continue
-            filename = f"audio_T{ti+1:02d}_{si+1:02d}.wav"
-            target = recursos_dir / filename
-            try:
-                result = synthesize(text, target, language="es")
-                if result:
-                    generated += 1
-                    # Insertar bloque [AUDIO] al principio del subapartado si no existe ya
-                    has_audio = any(
-                        b.get("type") == "audio" and (b.get("extras", {}).get("src") == filename)
-                        for b in sub.get("blocks", [])
-                    )
-                    if not has_audio:
-                        sub.setdefault("blocks", []).insert(0, {
-                            "type": "audio",
-                            "text": "Narración del subapartado",
-                            "items": [], "rows": [],
-                            "extras": {"src": filename, "file": filename},
-                        })
+            with open(structure_path_str, encoding="utf-8") as f:
+                data = json.load(f)
+
+            generated = 0
+            skipped = 0
+            errors = []
+            step = 0
+
+            for ti, topic in enumerate(data.get("topics", [])):
+                # Determinar carpeta de recursos correcta
+                if is_batch:
+                    idx_str = f"{ti+1:02d}"
+                    matching = [d for d in unit_dirs if d.name.startswith(f"unidad_{idx_str}_")]
+                    target_recursos = matching[0] / "recursos" if matching else job_dir / "salida" / "recursos"
+                elif single_dir.exists():
+                    target_recursos = single_dir / "recursos"
                 else:
-                    errors.append(f"T{ti+1}.{si+1}: TTS devolvió None")
-            except Exception as e:
-                errors.append(f"T{ti+1}.{si+1}: {e}")
+                    target_recursos = job_dir / "salida" / "recursos"
+                target_recursos.mkdir(parents=True, exist_ok=True)
 
-    # Persistir la estructura actualizada
-    try:
-        with open(structure_path, "w", encoding="utf-8") as f:
-            json.dump(course_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        errors.append(f"No se pudo guardar la estructura: {e}")
+                for si, sub in enumerate(topic.get("subsections", [])):
+                    step += 1
+                    _update_job(jid, current_step=step,
+                                current_label=f"Tema {ti+1}, sub {si+1}")
+                    class _BT:
+                        def __init__(self, v): self.value = v
+                    class _Holder: pass
+                    sub_obj = _Holder()
+                    sub_obj.title = sub.get("title", "")
+                    sub_obj.blocks = []
+                    for b in sub.get("blocks", []):
+                        blk = _Holder()
+                        blk.type = _BT(b.get("type", "paragraph"))
+                        blk.text = b.get("text", "")
+                        blk.items = b.get("items", [])
+                        sub_obj.blocks.append(blk)
+                    text = subsection_to_text(sub_obj)
+                    if not text.strip():
+                        skipped += 1
+                        continue
+                    filename = f"audio_T{ti+1:02d}_{si+1:02d}.wav"
+                    target = target_recursos / filename
+                    try:
+                        result = synthesize(text, target, language="es")
+                        if result:
+                            generated += 1
+                            has_audio = any(
+                                b.get("type") == "audio" and (b.get("extras", {}).get("src") == filename)
+                                for b in sub.get("blocks", [])
+                            )
+                            if not has_audio:
+                                sub.setdefault("blocks", []).insert(0, {
+                                    "type": "audio",
+                                    "text": "Narración del subapartado",
+                                    "items": [], "rows": [],
+                                    "extras": {"src": filename, "file": filename},
+                                })
+                        else:
+                            errors.append(f"T{ti+1}.{si+1}: TTS devolvió None")
+                    except Exception as e:
+                        errors.append(f"T{ti+1}.{si+1}: {e}")
+                        if len(errors) >= 10:
+                            # Demasiados errores, abortar antes de saturar
+                            errors.append("(abortado por demasiados errores)")
+                            break
 
-    return jsonify({
-        "generated": generated,
-        "skipped": skipped,
-        "errors": errors,
-    })
+            # Persistir
+            with open(structure_path_str, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            _update_job(jid, state="done", current_step=total_subs,
+                        result={
+                            "generated": generated,
+                            "skipped": skipped,
+                            "errors": errors[:20],
+                        })
+        except Exception as e:
+            _update_job(jid, state="error", error_message=str(e))
+
+    threading.Thread(target=_tts_worker, daemon=True).start()
+    return jsonify({"job_id": jid, "total": total_subs})
 
 
 @app.route("/api/curso/<token>/export-html", methods=["POST"])
@@ -7265,14 +9237,25 @@ def api_generar():
 
 @app.route("/api/descargar/<token>")
 def api_descargar(token):
+    """v0.5.16: respeta también cursos compartidos (los destinatarios con
+    permiso 'view' o 'edit' pueden descargar el ZIP)."""
     user = current_user()
     row = None
     if user:
         with db() as conn:
+            # Como dueño
             row = conn.execute(
                 "SELECT zip_path, title FROM courses WHERE token = ? AND user_id = ?",
                 (token, user["id"]),
             ).fetchone()
+            # Como destinatario de share (view o edit)
+            if not row:
+                row = conn.execute(
+                    """SELECT c.zip_path, c.title FROM courses c
+                       JOIN course_shares cs ON cs.course_id = c.id
+                       WHERE c.token = ? AND cs.shared_with_user_id = ?""",
+                    (token, user["id"]),
+                ).fetchone()
     if row:
         zip_path = Path(row["zip_path"])
         title = row["title"] or "curso"
@@ -7288,6 +9271,82 @@ def api_descargar(token):
         str(zip_path),
         as_attachment=True,
         download_name=f"scorm_{safe_title}_{token}.zip",
+        mimetype="application/zip",
+    )
+
+
+@app.route("/api/curso/<token>/aiken-zip")
+@login_required
+def api_descargar_aiken(token):
+    """v0.5.11: empaqueta TODOS los bancos Aiken del curso (aiken/, aiken_extendido/)
+    en un ZIP separado para descargar sin el SCORM completo.
+
+    Recolecta:
+      - salida/aiken/*.txt (banco básico generado al crear el curso)
+      - salida/aiken_extendido/*.txt (banco IA extendido si existe)
+      - salida/unidad_NN_*/aiken/*.txt (en modo batch)
+      - salida/unidad_NN_*/aiken_extendido/*.txt
+    """
+    user = current_user()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT zip_path, title FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        # v0.5.16: también destinatarios de share (cualquier permiso)
+        if not row:
+            row = conn.execute(
+                """SELECT c.zip_path, c.title FROM courses c
+                   JOIN course_shares cs ON cs.course_id = c.id
+                   WHERE c.token = ? AND cs.shared_with_user_id = ?""",
+                (token, user["id"]),
+            ).fetchone()
+    if not row:
+        abort(404)
+    job_dir = Path(row["zip_path"]).parent
+    output_dir = job_dir / "salida"
+    if not output_dir.exists():
+        return jsonify({"error": "El curso no tiene carpeta de salida"}), 404
+
+    # Recolectar todos los .txt de aiken
+    aiken_files = []
+    for search_dir in [
+        output_dir / "aiken",
+        output_dir / "aiken_extendido",
+        output_dir / "curso" / "aiken",
+        output_dir / "curso" / "aiken_extendido",
+    ]:
+        if search_dir.exists():
+            for f in search_dir.glob("*.txt"):
+                aiken_files.append((f, f"{search_dir.name}/{f.name}"))
+    # En modo batch, recorrer cada unidad
+    for unit_dir in sorted(output_dir.glob("unidad_*")):
+        unit_name = unit_dir.name
+        for search_dir in [unit_dir / "aiken", unit_dir / "aiken_extendido"]:
+            if search_dir.exists():
+                for f in search_dir.glob("*.txt"):
+                    aiken_files.append((f, f"{unit_name}/{search_dir.name}/{f.name}"))
+
+    if not aiken_files:
+        return jsonify({
+            "error": "No hay bancos Aiken en este curso. Genera primero el banco "
+                     "desde el editor (botón 📚 Banco Aiken IA) o regenera el curso "
+                     "con la opción 'banco Aiken' marcada."
+        }), 404
+
+    # Construir un ZIP en memoria
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for src, arcname in aiken_files:
+            zf.write(src, arcname=arcname)
+    buf.seek(0)
+
+    safe_title = re.sub(r"[^A-Za-z0-9_-]+", "_", row["title"] or "curso")[:50]
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f"aiken_{safe_title}_{token}.zip",
         mimetype="application/zip",
     )
 
