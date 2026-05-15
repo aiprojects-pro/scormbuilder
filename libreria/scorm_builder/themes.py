@@ -98,6 +98,73 @@ THEMES: Dict[str, Theme] = {
         primary_mist="#FFF7ED",
         accent="#1E40AF",
     ),
+    # v0.5.10: paletas nuevas
+    "amarillo": Theme(
+        name="amarillo",
+        label="Amarillo solar",
+        primary_deep="#713F12",      # ámbar muy oscuro
+        primary="#A16207",            # ámbar 700
+        primary_bright="#EAB308",     # amarillo 500
+        primary_pale="#FEF9C3",
+        primary_mist="#FEFCE8",
+        accent="#0E7490",             # complementario cian para acentos
+    ),
+    "negro": Theme(
+        name="negro",
+        label="Negro carbón",
+        primary_deep="#0A0A0A",
+        primary="#262626",
+        primary_bright="#525252",
+        primary_pale="#E5E5E5",
+        primary_mist="#F5F5F5",
+        accent="#B91C1C",             # acento rojo cuidado
+    ),
+    "magenta": Theme(
+        name="magenta",
+        label="Magenta vibrante",
+        primary_deep="#500724",
+        primary="#BE185D",
+        primary_bright="#EC4899",
+        primary_pale="#FCE7F3",
+        primary_mist="#FDF2F8",
+        accent="#0E7490",
+    ),
+    "cian": Theme(
+        name="cian",
+        label="Cian eléctrico",
+        primary_deep="#083344",
+        primary="#0E7490",
+        primary_bright="#06B6D4",
+        primary_pale="#CFFAFE",
+        primary_mist="#ECFEFF",
+        accent="#C2410C",
+    ),
+    "terracota": Theme(
+        name="terracota",
+        label="Terracota cálido",
+        primary_deep="#431407",
+        primary="#9A3412",
+        primary_bright="#C2410C",
+        primary_pale="#FED7AA",
+        primary_mist="#FFEDD5",
+        paper="#FAF6EF",
+        paper_warm="#F2EBDF",
+        paper_deep="#E8DFCE",
+        accent="#365314",
+    ),
+    "oliva": Theme(
+        name="oliva",
+        label="Oliva clásico",
+        primary_deep="#1A2E05",
+        primary="#365314",
+        primary_bright="#65A30D",
+        primary_pale="#ECFCCB",
+        primary_mist="#F7FEE7",
+        paper="#FAF6EF",
+        paper_warm="#F2EBDF",
+        paper_deep="#E8DFCE",
+        accent="#9A3412",
+    ),
 }
 
 

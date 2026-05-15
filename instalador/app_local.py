@@ -360,7 +360,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.8</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.10</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -909,11 +909,23 @@ HOME_BODY_TEMPLATE = """
     <div style="display: flex; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.6rem;">
       <button type="button" class="btn secondary" id="btnPreview" style="flex: 0 0 auto;">👁 Vista previa</button>
       <button type="submit" class="btn full" id="btnGenerar" style="flex: 1;">Crear paquete(s) SCORM →</button>
+      <button type="button" class="btn secondary" id="btnAddQueue" style="flex: 0 0 auto;" title="Encola este curso y deja libre el formulario para preparar otro mientras se procesa">➕ Añadir a la cola</button>
     </div>
     <p style="font-size: 0.82rem; color: var(--ink-mute); margin-bottom: 0.8rem;">
-      La vista previa muestra el primer tema en una nueva pestaña sin empaquetar (más rápido).
-      Útil para ver cómo queda con la paleta y los pesos antes de generar el paquete final.
+      <strong>Vista previa</strong>: muestra el primer tema sin empaquetar (rápido).
+      <strong>Crear paquete</strong>: genera el SCORM ahora mismo.
+      <strong>Añadir a la cola</strong>: encola este curso para procesarlo en segundo plano,
+      mientras tú vas preparando otro distinto. Los cursos se procesan uno por uno.
     </p>
+
+    <!-- v0.5.10: panel visual de cola -->
+    <div id="queuePanel" class="queue-panel" style="display:none;">
+      <div class="queue-header">
+        <h3>📋 Cola de cursos</h3>
+        <span class="queue-summary" id="queueSummary"></span>
+      </div>
+      <div id="queueList" class="queue-list"></div>
+    </div>
 
     <div class="progress" id="progress">
       <div class="step">Subiendo el documento</div>
@@ -1205,17 +1217,171 @@ document.getElementById("btnPreview").addEventListener("click", async () => {
   finally { btn.disabled = false; btn.textContent = orig; }
 });
 
-// ----- Submit -----
-document.getElementById("form").addEventListener("submit", async e => {
-  e.preventDefault();
+// ===== v0.5.10: helper para construir FormData del curso actual =====
+// (extraído del submit para que la cola pueda reutilizarlo)
+function buildCourseFormData() {
   const mode = document.querySelector('input[name=upload_mode]:checked').value;
   const filesToSend = (mode === "batch") ? docxBatchFiles : Array.from(docxInput.files);
-  if (!filesToSend.length) {
-    alert("Selecciona al menos un archivo Word.");
+  if (!filesToSend.length) return { error: "Selecciona al menos un archivo Word." };
+  const titulo = document.getElementById("titulo").value.trim();
+  if (!titulo) return { error: "Indica el título del curso." };
+  const fd = new FormData();
+  for (const f of filesToSend) fd.append("docx", f, f.name);
+  for (const f of resFiles) fd.append("recursos", f, f.name);
+  fd.append("upload_mode", mode);
+  fd.append("titulo", titulo);
+  fd.append("num_hours", document.getElementById("num_hours").value);
+  fd.append("autor", document.getElementById("autor").value);
+  fd.append("mastery", document.getElementById("mastery").value);
+  fd.append("scorm_version", document.querySelector('input[name=scorm_version]:checked').value);
+  fd.append("weight_view", document.getElementById("weight_view").value);
+  fd.append("weight_quiz", document.getElementById("weight_quiz").value);
+  fd.append("view_min_seconds", document.getElementById("view_min_seconds").value);
+  fd.append("view_strategy", document.getElementById("view_strategy").value);
+  fd.append("paleta", selectedPalette);
+  fd.append("color_deep", document.getElementById("color_deep").value);
+  fd.append("color_primary", document.getElementById("color_primary").value);
+  fd.append("color_bright", document.getElementById("color_bright").value);
+  ["track_completion","track_score","track_success","track_time","track_suspend",
+   "track_location","track_interactions","track_progress","track_objectives",
+   "track_max_time","track_max_attempts"].forEach(k => {
+    fd.append(k, document.getElementById(k).checked);
+  });
+  fd.append("max_time_minutes", document.getElementById("max_time_minutes").value);
+  fd.append("max_attempts", document.getElementById("max_attempts").value);
+  ["gen_pdf","gen_aiken","gen_html_standalone","gen_glossary","gen_json",
+   "gen_readme","gen_certificate","gen_anki","gen_subtitles","gen_wcag",
+   "gen_manifest_preview"].forEach(k => {
+    fd.append(k, document.getElementById(k).checked);
+  });
+  // Metadatos para la cola visual (no enviados al backend, solo para mostrar)
+  const filesMeta = filesToSend.map(f => f.name);
+  return { fd, meta: { titulo, paleta: selectedPalette, paletaLabel: palettes[selectedPalette]?.label || selectedPalette, mode, fileCount: filesToSend.length, fileNames: filesMeta } };
+}
+
+// ===== v0.5.10: cola de procesamiento secuencial =====
+const courseQueue = [];   // [{id, meta, fd, status, result, error}]
+let queueProcessing = false;
+
+function renderQueue() {
+  const panel = document.getElementById("queuePanel");
+  const list = document.getElementById("queueList");
+  const summary = document.getElementById("queueSummary");
+  if (!courseQueue.length) {
+    panel.style.display = "none";
     return;
   }
-  const titulo = document.getElementById("titulo").value.trim();
-  if (!titulo) { alert("Indica el título del curso."); return; }
+  panel.style.display = "block";
+  const counts = courseQueue.reduce((acc, j) => { acc[j.status] = (acc[j.status]||0)+1; return acc; }, {});
+  const parts = [];
+  if (counts.pending) parts.push(`${counts.pending} en cola`);
+  if (counts.running) parts.push(`${counts.running} procesando`);
+  if (counts.done) parts.push(`${counts.done} completado(s)`);
+  if (counts.error) parts.push(`${counts.error} con error`);
+  summary.textContent = parts.join(" · ");
+  list.innerHTML = courseQueue.map(j => {
+    const stateLabel = {
+      pending: "⏳ En cola",
+      running: "⚙️ Procesando…",
+      done: "✓ Completado",
+      error: "✗ Error",
+    }[j.status] || j.status;
+    const actionsHtml = j.status === "done" && j.result
+      ? `<a class="btn" href="/api/descargar/${j.result.token}">Descargar ZIP</a>
+         <a class="btn secondary" href="/curso/${j.result.token}/editar">Editar</a>
+         <button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Quitar de la lista</button>`
+      : j.status === "error"
+      ? `<button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Quitar</button>`
+      : j.status === "pending"
+      ? `<button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Cancelar</button>`
+      : `<span style="font-size:0.78rem;color:var(--ink-mute);">No se puede cancelar mientras procesa</span>`;
+    const errLine = j.status === "error" ? `<div class="queue-err">Error: ${j.error || "desconocido"}</div>` : "";
+    return `
+      <div class="queue-item queue-${j.status}">
+        <div class="queue-item-head">
+          <div class="queue-item-title">${escapeHtml(j.meta.titulo)}</div>
+          <div class="queue-item-status">${stateLabel}</div>
+        </div>
+        <div class="queue-item-meta">
+          ${j.meta.fileCount} archivo(s) · paleta ${escapeHtml(j.meta.paletaLabel)} · modo ${j.meta.mode}
+        </div>
+        ${errLine}
+        <div class="queue-item-actions">${actionsHtml}</div>
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+}
+
+window.removeFromQueue = function(id) {
+  const idx = courseQueue.findIndex(j => j.id === id);
+  if (idx < 0) return;
+  const j = courseQueue[idx];
+  if (j.status === "running") return;  // no quitar el en curso
+  courseQueue.splice(idx, 1);
+  renderQueue();
+};
+
+async function processQueue() {
+  if (queueProcessing) return;
+  const next = courseQueue.find(j => j.status === "pending");
+  if (!next) return;
+  queueProcessing = true;
+  next.status = "running";
+  renderQueue();
+  try {
+    const r = await fetch("/api/generar", { method: "POST", body: next.fd });
+    const data = await r.json();
+    if (!r.ok) {
+      next.status = "error";
+      next.error = data.error || ("HTTP " + r.status);
+    } else {
+      next.status = "done";
+      next.result = data;
+    }
+  } catch (e) {
+    next.status = "error";
+    next.error = e.message || String(e);
+  } finally {
+    next.fd = null;  // liberar memoria del FormData
+    queueProcessing = false;
+    renderQueue();
+    // Procesar siguiente si lo hay
+    setTimeout(processQueue, 50);
+  }
+}
+
+document.getElementById("btnAddQueue").addEventListener("click", () => {
+  const built = buildCourseFormData();
+  if (built.error) { alert(built.error); return; }
+  const id = "j_" + Date.now() + "_" + Math.random().toString(36).slice(2,7);
+  courseQueue.push({ id, meta: built.meta, fd: built.fd, status: "pending" });
+  renderQueue();
+  // Reset suave del formulario para preparar el siguiente
+  // (sólo título y archivos; el resto de ajustes los suele querer mantener)
+  document.getElementById("titulo").value = "";
+  if (docxInput) docxInput.value = "";
+  docxBatchFiles = [];
+  const batchList = document.getElementById("batchList");
+  if (batchList) batchList.innerHTML = "";
+  resFiles = [];
+  const resourcesInput = document.getElementById("resources");
+  if (resourcesInput) resourcesInput.value = "";
+  const resList = document.getElementById("resList");
+  if (resList) resList.innerHTML = "";
+  // Auto-start
+  processQueue();
+  // Aviso visual
+  document.getElementById("queuePanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+});
+
+// ===== Submit (modo "ahora") =====
+document.getElementById("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const built = buildCourseFormData();
+  if (built.error) { alert(built.error); return; }
 
   const btn = document.getElementById("btnGenerar");
   const progress = document.getElementById("progress");
@@ -1235,41 +1401,8 @@ document.getElementById("form").addEventListener("submit", async e => {
     }, i * 350);
   }
 
-  const fd = new FormData();
-  for (const f of filesToSend) fd.append("docx", f, f.name);
-  for (const f of resFiles) fd.append("recursos", f, f.name);
-
-  fd.append("upload_mode", mode);
-  fd.append("titulo", titulo);
-  fd.append("num_hours", document.getElementById("num_hours").value);
-  fd.append("autor", document.getElementById("autor").value);
-  fd.append("mastery", document.getElementById("mastery").value);
-  fd.append("scorm_version", document.querySelector('input[name=scorm_version]:checked').value);
-  fd.append("weight_view", document.getElementById("weight_view").value);
-  fd.append("weight_quiz", document.getElementById("weight_quiz").value);
-  fd.append("view_min_seconds", document.getElementById("view_min_seconds").value);
-  fd.append("view_strategy", document.getElementById("view_strategy").value);
-  fd.append("paleta", selectedPalette);
-  fd.append("color_deep", document.getElementById("color_deep").value);
-  fd.append("color_primary", document.getElementById("color_primary").value);
-  fd.append("color_bright", document.getElementById("color_bright").value);
-
-  ["track_completion","track_score","track_success","track_time","track_suspend",
-   "track_location","track_interactions","track_progress","track_objectives",
-   "track_max_time","track_max_attempts"].forEach(k => {
-    fd.append(k, document.getElementById(k).checked);
-  });
-  fd.append("max_time_minutes", document.getElementById("max_time_minutes").value);
-  fd.append("max_attempts", document.getElementById("max_attempts").value);
-
-  ["gen_pdf","gen_aiken","gen_html_standalone","gen_glossary","gen_json",
-   "gen_readme","gen_certificate","gen_anki","gen_subtitles","gen_wcag",
-   "gen_manifest_preview"].forEach(k => {
-    fd.append(k, document.getElementById(k).checked);
-  });
-
   try {
-    const r = await fetch("/api/generar", { method: "POST", body: fd });
+    const r = await fetch("/api/generar", { method: "POST", body: built.fd });
     const data = await r.json();
     if (!r.ok) {
       alert("Error: " + (data.error || "desconocido"));
@@ -1440,6 +1573,91 @@ input[type="file"] { display: none; }
 }
 .warnings ul { margin: 0.3rem 0 0 1.5rem; }
 
+/* v0.5.10: Panel de cola de cursos */
+.queue-panel {
+  margin: 1rem 0;
+  padding: 1rem 1.2rem;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 10px;
+}
+.queue-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+.queue-header h3 {
+  font-size: 1rem;
+  color: #5b21b6;
+  margin: 0;
+}
+.queue-summary {
+  font-size: 0.85rem;
+  color: #6d28d9;
+  font-weight: 600;
+}
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.queue-item {
+  background: white;
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  border-left: 4px solid #d1d5db;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.queue-item.queue-running { border-left-color: #6366f1; background: #fafaff; }
+.queue-item.queue-done { border-left-color: #10b981; background: #f0fdf4; }
+.queue-item.queue-error { border-left-color: #ef4444; background: #fef2f2; }
+.queue-item.queue-pending { border-left-color: #d1d5db; }
+.queue-item-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.queue-item-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #1f2937;
+}
+.queue-item-status {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #4b5563;
+}
+.queue-item.queue-running .queue-item-status { color: #4f46e5; }
+.queue-item.queue-done .queue-item-status { color: #047857; }
+.queue-item.queue-error .queue-item-status { color: #b91c1c; }
+.queue-item-meta {
+  font-size: 0.78rem;
+  color: var(--ink-mute);
+}
+.queue-err {
+  font-size: 0.78rem;
+  color: #b91c1c;
+  padding: 0.3rem 0.5rem;
+  background: #fee2e2;
+  border-radius: 4px;
+}
+.queue-item-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.queue-item-actions .btn {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.82rem;
+}
+
 /* Cabecera prominente "Crear nuevo curso" */
 .card-hero {
   background: linear-gradient(135deg, var(--primary-mist) 0%, white 60%);
@@ -1587,7 +1805,90 @@ LIBRARY_EXTRA_CSS = """
   padding-top: 0.7rem; border-top: 1px solid var(--paper-deep);
 }
 .course-actions .btn { padding: 0.5rem 0.9rem; font-size: 0.85rem; }
+
+/* v0.5.10: badges de mejoras IA en las cards */
+.course-card.has-ai {
+  border-color: #c4b5fd;
+  background: linear-gradient(135deg, white 0%, #fafafe 100%);
+}
+.ai-badges-row {
+  display: flex; flex-wrap: wrap; gap: 0.35rem;
+  padding: 0.55rem 0;
+}
+.ai-banner {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: white;
+  padding: 0.25rem 0.65rem;
+  border-radius: 12px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.ai-badge {
+  background: #f5f3ff;
+  color: #5b21b6;
+  padding: 0.2rem 0.55rem;
+  border-radius: 12px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid #ddd6fe;
+}
 """
+
+
+def _detect_ai_features(job_dir: Path) -> list[str]:
+    """v0.5.10: detecta qué mejoras IA tiene aplicado un curso leyendo su
+    structure.json. Devuelve una lista de badges textuales tipo:
+      ['📑 60 tags', '💬 12 callouts', '🧪 25 preg test', '💡 8 repaso', '📖 glosario', '🖼️ 46 alt-text']
+    Si no hay mejoras detectables, devuelve [].
+    """
+    structure_path = Path(job_dir) / "structure.json"
+    if not structure_path.exists():
+        return []
+    try:
+        with open(structure_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    badges = []
+    topics = data.get("topics", []) or []
+    n_tags = sum(len(t.get("tags") or []) for t in topics)
+    if n_tags > 0:
+        badges.append(f"📑 {n_tags} tags")
+    n_callouts = 0
+    n_alt = 0
+    n_glossary_terms = 0
+    has_glossary_topic = False
+    for t in topics:
+        for sub in t.get("subsections", []) or []:
+            for b in sub.get("blocks", []) or []:
+                btype = b.get("type", "")
+                if btype in ("callout_key", "callout_alert", "callout_warn",
+                             "callout_success", "quote"):
+                    n_callouts += 1
+                if btype == "image" and (b.get("text") or "").strip():
+                    n_alt += 1
+        # Glosario: tema cuyo título sea "Glosario" o similar
+        if (t.get("title") or "").strip().lower() == "glosario":
+            has_glossary_topic = True
+            for sub in t.get("subsections", []) or []:
+                for b in sub.get("blocks", []) or []:
+                    if b.get("type") == "callout_key" and ":" in (b.get("text") or ""):
+                        n_glossary_terms += 1
+    if n_callouts > 0:
+        badges.append(f"💬 {n_callouts} callouts")
+    n_quiz_final = sum(len(t.get("quiz") or []) for t in topics)
+    if n_quiz_final > 0:
+        badges.append(f"🧪 {n_quiz_final} preg. test")
+    n_inline = sum(sum(len(v or []) for v in (t.get("inline_quiz") or {}).values())
+                   for t in topics)
+    if n_inline > 0:
+        badges.append(f"💡 {n_inline} preg. repaso")
+    if n_alt > 0:
+        badges.append(f"🖼️ {n_alt} alt-text")
+    if has_glossary_topic:
+        badges.append(f"📖 glosario ({n_glossary_terms})" if n_glossary_terms else "📖 glosario")
+    return badges
 
 
 @app.route("/biblioteca")
@@ -1621,11 +1922,21 @@ def library():
                 f'<span style="background:#FFFBEB;color:#92400E;">⚠ {len(warnings)} aviso(s)</span>'
                 if warnings else ""
             )
+            # v0.5.10: detectar qué mejoras IA tiene el curso leyendo su structure.json
+            ai_badges = _detect_ai_features(Path(r["zip_path"]).parent)
+            ai_html = ""
+            if ai_badges:
+                ai_html = (
+                    '<div class="ai-badges-row">'
+                    '<span class="ai-banner">✨ IA aplicada</span>'
+                    + "".join(f'<span class="ai-badge">{b}</span>' for b in ai_badges)
+                    + '</div>'
+                )
             size_kb = (r["zip_size"] or 0) / 1024
             size_str = f"{size_kb:,.0f} KB" if size_kb < 1024 else f"{size_kb/1024:,.1f} MB"
             created = r["created_at"][:16].replace("T", " ")
             cards.append(f"""
-            <div class="course-card">
+            <div class="course-card{' has-ai' if ai_badges else ''}">
               <h3>{(r['title'] or 'Sin título')}</h3>
               <div class="course-meta">
                 <span>{r['num_topics'] or 0} tema(s)</span>
@@ -1635,10 +1946,12 @@ def library():
                 <span>{size_str}</span>
                 {warning_badge}
               </div>
+              {ai_html}
               <div class="course-date">📅 {created}</div>
               <div class="course-actions">
                 <a class="btn" href="/api/descargar/{r['token']}">Descargar ZIP</a>
                 <a class="btn secondary" href="/curso/{r['token']}">Detalle</a>
+                <a class="btn secondary" href="/curso/{r['token']}/editar">Editar</a>
                 <form method="post" action="/curso/{r['token']}/borrar" style="display:inline;"
                       onsubmit="return confirm('¿Borrar este curso definitivamente?')">
                   <button type="submit" class="btn danger">Borrar</button>
@@ -1809,9 +2122,9 @@ def course_edit(token):
     // ============================================================
     function buildToolbarHtml(position) {{
       // position = 'top' | 'bottom' — diferencia en clase para CSS
-      // Cada botón lleva una clase data-act-XXX que permite duplicar handlers
+      // Cada botón lleva una clase ed-act-XXX que permite duplicar handlers
       let h = '';
-      // Banner enrich
+      // Banner enrich (mejora IA global)
       h += '<div class="ed-enrich-banner ed-toolbar-' + position + '">';
       h += '<div class="ed-enrich-banner-text">';
       h += '<strong>✨ ¿Quieres mejorar todo el curso con IA?</strong> ';
@@ -1822,21 +2135,42 @@ def course_edit(token):
       h += '</div>';
       h += '<button type="button" class="btn-ai btn-enrich-all ed-act-enrich-all">✨ Aplicar mejoras IA al curso completo</button>';
       h += '</div>';
-      // Botones globales
+
+      // v0.5.9: barra de acciones reorganizada en GRUPOS visuales.
+      // - Grupo 1: GUARDAR Y DESCARGAR (acciones principales: oscuro destacado)
+      // - Grupo 2: MEJORAS CON IA (botones morados)
+      // - Grupo 3: REVISAR Y EXPORTAR (botones claros)
       h += '<div class="ed-actions ed-toolbar-' + position + '">';
-      h += '<button class="btn ed-act-save">💾 Guardar y reempaquetar</button>';
+
+      // GRUPO 1: principales
+      h += '<div class="ed-group ed-group-primary" data-label="Guardar y descargar">';
+      h += '<button class="btn ed-act-save" title="Guarda los cambios y reempaqueta el SCORM con todas las mejoras aplicadas">💾 Guardar y reempaquetar</button>';
+      h += '<button type="button" class="btn ed-act-download" title="Descarga el SCORM con todas las mejoras (solo disponible tras guardar)">📥 Descargar SCORM actualizado</button>';
+      h += '<button type="button" class="btn secondary ed-act-preview" title="Previsualizar sin descargar">👁 Vista previa</button>';
       h += '<button type="button" class="btn secondary ed-act-discard" title="Descartar cambios desde el último guardado">↺ Descartar cambios</button>';
       h += '<a class="btn secondary" href="/curso/' + TOKEN + '">Salir</a>';
-      h += '<button type="button" class="btn-ai ed-act-glossary">📖 Generar glosario del curso con IA</button>';
-      h += '<button type="button" class="btn-ai ed-act-alt-text-all">🖼️ Generar alt-text para todas las imágenes</button>';
-      h += '<button type="button" class="btn-ai ed-act-tts">🔊 Generar narración TTS de todo el curso</button>';
-      h += '<button type="button" class="btn secondary ed-act-wcag-check">🔍 Validar WCAG 2.1 AA</button>';
-      h += '<button type="button" class="btn secondary ed-act-preview">👁 Vista previa del SCORM</button>';
-      h += '<button type="button" class="btn-ai ed-act-aiken-ext">📚 Banco Aiken extendido con IA (30 pregs / tema)</button>';
-      h += '<button type="button" class="btn secondary ed-act-export-imscp">📦 Exportar como IMS CP (Moodle)</button>';
-      h += '<button type="button" class="btn secondary ed-act-export-cmi5">⚡ Exportar como cmi5 / xAPI</button>';
+      h += '</div>';
+
+      // GRUPO 2: IA
+      h += '<div class="ed-group ed-group-ai" data-label="Enriquecer con IA">';
+      h += '<button type="button" class="btn-ai ed-act-glossary" title="Genera un glosario con los términos clave del curso">📖 Glosario IA</button>';
+      h += '<button type="button" class="btn-ai ed-act-alt-text-all" title="Genera descripciones alt para todas las imágenes (accesibilidad)">🖼️ Alt-text IA</button>';
+      h += '<button type="button" class="btn-ai ed-act-tts" title="Genera audio de narración para todos los textos">🔊 Narración TTS</button>';
+      h += '<button type="button" class="btn-ai ed-act-aiken-ext" title="Crea un banco de 30 preguntas por tema en formato Aiken">📚 Banco Aiken (30 preg/tema)</button>';
+      h += '</div>';
+
+      // GRUPO 3: revisar/exportar
+      h += '<div class="ed-group ed-group-export" data-label="Revisar y exportar">';
+      h += '<button type="button" class="btn secondary ed-act-wcag-check" title="Comprueba la accesibilidad del curso según WCAG 2.1 AA">🔍 Validar WCAG 2.1 AA</button>';
+      h += '<button type="button" class="btn secondary ed-act-export-imscp" title="Exporta como paquete IMS Content Package para Moodle">📦 IMS CP (Moodle)</button>';
+      h += '<button type="button" class="btn secondary ed-act-export-cmi5" title="Exporta como paquete cmi5 / xAPI">⚡ cmi5 / xAPI</button>';
+      h += '</div>';
+
+      // Estado
+      h += '<div class="ed-status-wrap">';
       h += '<span class="ed-dirty-indicator" style="display:' + (dirty ? 'inline-block' : 'none') + '; background:#fbbf24; color:#78350f; padding:0.3rem 0.6rem; border-radius:4px; font-size:0.8rem; font-weight:600;">● Cambios sin guardar</span>';
       h += '<span class="ed-status"></span>';
+      h += '</div>';
       h += '</div>';
       return h;
     }}
@@ -1854,6 +2188,15 @@ def course_edit(token):
       // Save y Discard (handlers definidos abajo)
       bindAct('save', save);
       bindAct('discard', restoreSnapshot);
+      // v0.5.9: descarga directa del SCORM actualizado
+      bindAct('download', () => {{
+        if (dirty) {{
+          alert('Tienes cambios sin guardar. Pulsa primero "💾 Guardar y reempaquetar" para que las mejoras estén incluidas en el ZIP descargado.');
+          return;
+        }}
+        // Disparar descarga
+        window.location.href = '/api/descargar/' + TOKEN;
+      }});
       // El resto de handlers se enganchan más abajo (después del render())
       // mediante bindAct() llamado desde cada bloque correspondiente.
     }}
@@ -3275,6 +3618,59 @@ def course_edit(token):
       white-space: normal;       /* permite saltos de línea dentro del botón */
       max-width: 220px;          /* evita botones gigantes en pantallas anchas */
     }}
+
+    /* v0.5.9: grupos visuales en la barra de acciones */
+    .ed-actions {{
+      flex-direction: column;
+      align-items: stretch;
+      gap: 1rem;
+    }}
+    .ed-group {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      align-items: stretch;
+      padding: 0.85rem 1rem 1rem;
+      border-radius: 10px;
+      position: relative;
+      border: 1px solid #e5e7eb;
+      background: #fafafa;
+    }}
+    .ed-group::before {{
+      content: attr(data-label);
+      position: absolute;
+      top: -0.55rem;
+      left: 0.85rem;
+      background: #fff;
+      padding: 0 0.4rem;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b7280;
+    }}
+    .ed-group-primary {{
+      background: #f0f9ff;
+      border-color: #bfdbfe;
+    }}
+    .ed-group-primary::before {{ color: #1d4ed8; }}
+    .ed-group-ai {{
+      background: #f5f3ff;
+      border-color: #ddd6fe;
+    }}
+    .ed-group-ai::before {{ color: #6d28d9; }}
+    .ed-group-export {{
+      background: #f9fafb;
+      border-color: #e5e7eb;
+    }}
+    .ed-group-export::before {{ color: #4b5563; }}
+    .ed-status-wrap {{
+      display: flex;
+      gap: 0.7rem;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 0.3rem 0.5rem;
+    }}
     .ed-quiz h3 {{ display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }}
     .ed-quiz-empty {{ background: var(--paper-warm); border-radius: 6px; padding: 1rem 1.2rem; }}
     .btn-ai {{
@@ -4065,6 +4461,62 @@ def course_structure_save(token):
     except Exception as e:
         return jsonify({"error": f"Error al reempaquetar: {e}"}), 500
 
+    # v0.5.9: si el curso era modo BATCH, también actualizar cada unidad_NN_*/.
+    # rebuild_from_structure ya generó salida/scorm/T01_*.zip, T02_*.zip, ...
+    # Los copiamos a cada unidad_NN_*/scorm/ para que el ZIP descargado tenga
+    # las mejoras de IA aplicadas tanto en el SCORM consolidado como en los
+    # SCORM por unidad. Y actualizamos también el estructura_curso.json de cada
+    # unidad con los datos del topic correspondiente.
+    import logging as _logging
+    _bg_logger = _logging.getLogger("scormbuilder.batch_rebuild")
+    batch_units_updated = 0
+    try:
+        unit_dirs = sorted(output_dir.glob("unidad_*"))
+        if unit_dirs:
+            from scorm_builder.parser import CourseStructure as _CS
+            consolidated_scorm = output_dir / "scorm"
+            for ti, topic in enumerate(course.topics):
+                idx_str = f"{ti+1:02d}"
+                matching = [d for d in unit_dirs if d.name.startswith(f"unidad_{idx_str}_")]
+                if not matching:
+                    continue
+                unit_dir = matching[0]
+                unit_scorm_dir = unit_dir / "scorm"
+                # Limpiar SCORM viejo y copiar el actualizado
+                if unit_scorm_dir.exists():
+                    shutil.rmtree(unit_scorm_dir, ignore_errors=True)
+                unit_scorm_dir.mkdir(parents=True, exist_ok=True)
+                # El nuevo SCORM consolidado tiene salida/scorm/{course_slug}_T{NN}_*.zip
+                # build_all_topics genera el nombre con prefijo del slug del curso, así
+                # que usamos un patrón con * al principio para matchear cualquier slug.
+                tprefix = f"T{topic.number:02d}_"
+                if consolidated_scorm.exists():
+                    matching_zips = list(consolidated_scorm.glob(f"*{tprefix}*.zip"))
+                    for src_zip in matching_zips:
+                        try:
+                            shutil.copy2(src_zip, unit_scorm_dir / src_zip.name)
+                        except Exception:
+                            pass
+                    if matching_zips:
+                        batch_units_updated += 1
+                # Actualizar estructura_curso.json de la unidad
+                extras_dir = unit_dir / "extras"
+                extras_dir.mkdir(exist_ok=True)
+                try:
+                    unit_course = _CS(
+                        metadata=course.metadata,
+                        topics=[topic],
+                        warnings=[],
+                    )
+                    (extras_dir / "estructura_curso.json").write_text(
+                        json.dumps(unit_course.to_dict(), ensure_ascii=False, indent=2),
+                        encoding="utf-8"
+                    )
+                except Exception as e:
+                    _bg_logger.warning(f"v0.5.9: estructura unidad {idx_str} no se pudo actualizar: {e}")
+    except Exception as e:
+        _bg_logger.warning(f"v0.5.9: regeneración batch fallida: {e}")
+
     # Reempaquetar el ZIP descargable
     final_zip = job_dir / f"curso_{token}.zip"
     if final_zip.exists():
@@ -4092,7 +4544,9 @@ def course_structure_save(token):
         )
         conn.commit()
 
-    return jsonify({"ok": True, "token": token, "auto_repaired": auto_repaired})
+    return jsonify({"ok": True, "token": token,
+                    "auto_repaired": auto_repaired,
+                    "batch_units_updated": batch_units_updated})
 
 
 @app.route("/api/curso/<token>/ai-quiz", methods=["POST"])
