@@ -82,6 +82,29 @@ if not _secret_path.exists():
 app.secret_key = _secret_path.read_bytes()
 
 
+# v0.5.18: headers de seguridad globales
+@app.after_request
+def _add_security_headers(response):
+    """Añade cabeceras de seguridad básicas a todas las respuestas.
+    
+    - X-Frame-Options: previene clickjacking (no se puede embeber en iframe)
+    - X-Content-Type-Options: previene MIME sniffing
+    - Referrer-Policy: limita info enviada en el header Referer
+    - Strict-Transport-Security: solo cuando se sirve sobre HTTPS (en proxy nginx)
+    
+    NO añadimos CSP estricto porque romperia los SCORMs inline (renderizamos
+    HTML generado por la IA con estilos inline). Si en el futuro se quiere CSP,
+    habría que separar el editor de las previsualizaciones SCORM.
+    """
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    # HSTS solo si la petición vino por HTTPS (nginx lo proxea con X-Forwarded-Proto)
+    if request.headers.get("X-Forwarded-Proto") == "https" or request.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 # ============================================================
 # Base de datos (SQLite, sin dependencias externas)
 # ============================================================
@@ -146,6 +169,18 @@ def init_db():
             last_upload_result TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+        );
+        -- v0.5.17: paletas de colores personalizadas guardadas por el usuario
+        CREATE TABLE IF NOT EXISTS user_palettes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            color_deep TEXT NOT NULL,
+            color_primary TEXT NOT NULL,
+            color_bright TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(user_id, name)
         );
         """)
 
@@ -359,7 +394,10 @@ def render_page(title, body, user=None, active=""):
     user_chip = ""
     nav_links = ""
     if user:
-        user_chip = f'<span class="user-chip">👤 {user.get("display_name") or user["email"]}</span>'
+        # v0.5.18: escape HTML para evitar XSS si el display_name contiene
+        # caracteres especiales o etiquetas
+        display = user.get("display_name") or user["email"]
+        user_chip = f'<span class="user-chip">👤 {html_escape(display)}</span>'
         active_home = ' class="active"' if active == "home" else ""
         active_lib = ' class="active"' if active == "library" else ""
         nav_links = f'''
@@ -384,13 +422,13 @@ def render_page(title, body, user=None, active=""):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} · SCORM Builder</title>
+<title>{html_escape(title)} · SCORM Builder</title>
 <style>{BASE_CSS}{{{{ extra_css|safe }}}}</style>
 </head>
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.16</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.18</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -482,7 +520,8 @@ def login():
             push_flash("error", "Email o contraseña incorrectos.")
             return render_page("Iniciar sesión", LOGIN_BODY, active="login")
         session["user_id"] = row["id"]
-        push_flash("success", f"Bienvenido/a {row['display_name'] or row['email']}.")
+        # v0.5.18: escape HTML del display_name para evitar XSS
+        push_flash("success", f"Bienvenido/a {html_escape(row['display_name'] or row['email'])}.")
         nxt = request.args.get("next", "/")
         if not nxt.startswith("/"):
             nxt = "/"
@@ -495,9 +534,17 @@ def register():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
+        password2 = request.form.get("password2", "")
         display_name = request.form.get("display_name", "").strip() or None
-        if not email or not password or len(password) < 6:
-            push_flash("error", "Email obligatorio y contraseña con mínimo 6 caracteres.")
+        if not email or "@" not in email:
+            push_flash("error", "Email no válido (debe contener @).")
+            return render_page("Registrarse", REGISTER_BODY, active="register")
+        if not password or len(password) < 6:
+            push_flash("error", "La contraseña debe tener al menos 6 caracteres.")
+            return render_page("Registrarse", REGISTER_BODY, active="register")
+        # v0.5.18: validar que las dos contraseñas coincidan
+        if password2 and password != password2:
+            push_flash("error", "Las dos contraseñas no coinciden. Vuelve a intentarlo.")
             return render_page("Registrarse", REGISTER_BODY, active="register")
         with db() as conn:
             existing = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
@@ -911,24 +958,70 @@ HOME_BODY_TEMPLATE = """
   <!-- Bloque 8: Marca y colores -->
   <div class="card">
     <h2><span class="num">8</span> Marca y colores</h2>
+    <p class="card-help">Elige una paleta predefinida o crea la tuya. Las paletas que guardes aparecerán aquí abajo, en <em>"Mis paletas guardadas"</em>, listas para reusar en futuros cursos.</p>
     <div class="palette-grid" id="paletteGrid"></div>
-    <details style="margin-top: 1.5rem;">
-      <summary style="cursor: pointer; color: var(--ink-mute); font-size: 0.9rem;">
-        ¿Quieres usar tus propios colores? (opcional)
+
+    <!-- v0.5.17: paletas guardadas del usuario -->
+    <div id="userPalettesSection" style="margin-top: 1.2rem; display: none;">
+      <h3 class="palette-section-title">⭐ Mis paletas guardadas</h3>
+      <div class="palette-grid" id="userPalettesGrid"></div>
+    </div>
+
+    <details style="margin-top: 1.5rem;" id="customColorsDetails">
+      <summary style="cursor: pointer; color: var(--ink-mute); font-size: 0.95rem; font-weight: 600;">
+        🎨 ¿Quieres usar tus propios colores? (opcional)
       </summary>
+      <p class="custom-colors-help">
+        Define tres colores en formato hexadecimal. <strong>El nombre del campo te dice dónde se usa</strong> dentro del SCORM generado:
+      </p>
       <div style="margin-top: 1rem;" class="row">
         <div class="field">
           <label for="color_deep">Color cabecera (oscuro)</label>
           <input type="color" id="color_deep" value="#0A2540">
+          <p class="field-hint">
+            Se usa en: cabecera principal, fondo de banners, números de tema, footer.
+            Debe ser un tono <strong>oscuro</strong> que contraste con texto blanco (idealmente HSL con luminosidad &lt; 30%).
+          </p>
         </div>
         <div class="field">
           <label for="color_primary">Color primario</label>
           <input type="color" id="color_primary" value="#1D4ED8">
+          <p class="field-hint">
+            Se usa en: botones principales (Comenzar, Siguiente), enlaces, marcos
+            de los callouts CLAVE, encabezados H2. Es el <strong>color principal</strong> de la marca.
+          </p>
         </div>
         <div class="field">
           <label for="color_bright">Color brillante (acentos)</label>
           <input type="color" id="color_bright" value="#2563EB">
+          <p class="field-hint">
+            Se usa en: hover de botones, badges de "completado", iconos
+            destacados, bullets de listas. Un tono <strong>más vivo y saturado</strong>
+            que el primario, para llamar la atención.
+          </p>
         </div>
+      </div>
+      <!-- v0.5.17: previsualización en vivo -->
+      <div class="custom-colors-preview" id="customColorsPreview">
+        <p class="preview-label">Vista previa:</p>
+        <div class="preview-mockup">
+          <div class="preview-header" id="previewHeader">📚 Título del curso</div>
+          <div class="preview-body">
+            <h4 id="previewH2">Tema 1: Introducción</h4>
+            <p>Texto de un párrafo normal del curso.</p>
+            <div class="preview-callout" id="previewCallout">
+              <strong>CLAVE:</strong> Texto importante destacado en un callout.
+            </div>
+            <button class="preview-btn" id="previewBtn">Comenzar tema</button>
+          </div>
+        </div>
+      </div>
+      <!-- v0.5.17: guardar paleta -->
+      <div class="save-palette-row" id="savePaletteRow">
+        <label for="paletteName">Guardar esta combinación como nueva paleta:</label>
+        <input type="text" id="paletteName" placeholder="Ej: Marca CGD Formación" maxlength="60">
+        <button type="button" class="btn-save-palette" id="btnSavePalette">💾 Guardar paleta</button>
+        <p id="savePaletteMsg" class="save-palette-msg"></p>
       </div>
     </details>
   </div>
@@ -985,8 +1078,9 @@ HOME_BODY_TEMPLATE = """
 <script>
 const palettes = __PALETTES_JSON__;
 let selectedPalette = "azul";
+let selectedUserPaletteColors = null;  // {deep, primary, bright} si se selecciona una user palette
 
-// ----- Render paleta -----
+// ----- Render paleta predefinida -----
 const grid = document.getElementById("paletteGrid");
 for (const [name, info] of Object.entries(palettes)) {
   const card = document.createElement("div");
@@ -1002,9 +1096,124 @@ for (const [name, info] of Object.entries(palettes)) {
     document.querySelectorAll(".palette-card").forEach(c => c.classList.remove("selected"));
     card.classList.add("selected");
     selectedPalette = name;
+    selectedUserPaletteColors = null;
   };
   grid.appendChild(card);
 }
+
+// ----- v0.5.17: Cargar y mostrar paletas personalizadas del usuario -----
+async function loadUserPalettes() {
+  try {
+    const r = await fetch("/api/paletas");
+    if (!r.ok) return;
+    const data = await r.json();
+    const section = document.getElementById("userPalettesSection");
+    const ugrid = document.getElementById("userPalettesGrid");
+    if (!data.palettes || !data.palettes.length) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+    ugrid.innerHTML = "";
+    data.palettes.forEach(p => {
+      const card = document.createElement("div");
+      card.className = "palette-card palette-card-user";
+      card.innerHTML = `
+        <div class="palette-name">${p.name}
+          <button type="button" class="palette-del" data-id="${p.id}" title="Borrar esta paleta">×</button>
+        </div>
+        <div class="palette-colors">
+          <span style="background:${p.color_deep}"></span>
+          <span style="background:${p.color_primary}"></span>
+          <span style="background:${p.color_bright}"></span>
+        </div>`;
+      card.onclick = (e) => {
+        if (e.target.classList.contains("palette-del")) return;
+        document.querySelectorAll(".palette-card").forEach(c => c.classList.remove("selected"));
+        card.classList.add("selected");
+        selectedPalette = "__user__";
+        selectedUserPaletteColors = {
+          deep: p.color_deep,
+          primary: p.color_primary,
+          bright: p.color_bright,
+        };
+        // Auto-rellenar los color pickers para que vean los valores
+        document.getElementById("color_deep").value = p.color_deep;
+        document.getElementById("color_primary").value = p.color_primary;
+        document.getElementById("color_bright").value = p.color_bright;
+        updatePreview();
+      };
+      const delBtn = card.querySelector(".palette-del");
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`¿Borrar la paleta "${p.name}"?`)) return;
+        const r = await fetch(`/api/paletas/${p.id}`, {method: "DELETE"});
+        if (r.ok) loadUserPalettes();
+      };
+      ugrid.appendChild(card);
+    });
+  } catch (e) { console.warn("No se pudieron cargar las paletas del usuario", e); }
+}
+loadUserPalettes();
+
+// ----- v0.5.17: Preview en vivo de colores custom -----
+function updatePreview() {
+  const deep = document.getElementById("color_deep").value;
+  const primary = document.getElementById("color_primary").value;
+  const bright = document.getElementById("color_bright").value;
+  const header = document.getElementById("previewHeader");
+  const h2 = document.getElementById("previewH2");
+  const callout = document.getElementById("previewCallout");
+  const btn = document.getElementById("previewBtn");
+  if (header) header.style.background = deep;
+  if (h2) h2.style.color = primary;
+  if (callout) callout.style.borderColor = primary;
+  if (btn) btn.style.background = bright;
+}
+["color_deep", "color_primary", "color_bright"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", updatePreview);
+});
+updatePreview();
+
+// ----- v0.5.17: Guardar paleta personalizada -----
+document.getElementById("btnSavePalette").onclick = async () => {
+  const name = document.getElementById("paletteName").value.trim();
+  const msgEl = document.getElementById("savePaletteMsg");
+  msgEl.textContent = "";
+  msgEl.className = "save-palette-msg";
+  if (!name) {
+    msgEl.textContent = "✗ Pon un nombre a la paleta (ej: Marca CGD)";
+    msgEl.className = "save-palette-msg err";
+    return;
+  }
+  const body = {
+    name: name,
+    color_deep: document.getElementById("color_deep").value,
+    color_primary: document.getElementById("color_primary").value,
+    color_bright: document.getElementById("color_bright").value,
+  };
+  try {
+    const r = await fetch("/api/paletas", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      msgEl.textContent = "✗ " + (data.error || "error desconocido");
+      msgEl.className = "save-palette-msg err";
+      return;
+    }
+    msgEl.textContent = `✓ Paleta "${name}" guardada. Ya está disponible en "Mis paletas guardadas".`;
+    msgEl.className = "save-palette-msg ok";
+    document.getElementById("paletteName").value = "";
+    loadUserPalettes();
+  } catch (e) {
+    msgEl.textContent = "✗ " + e.message;
+    msgEl.className = "save-palette-msg err";
+  }
+};
 
 // ----- Comportamiento radio-cards -----
 document.querySelectorAll(".radio-cards").forEach(group => {
@@ -1574,9 +1783,113 @@ input[type="file"] { display: none; }
 }
 .palette-card:hover { border-color: var(--primary-bright); }
 .palette-card.selected { border-color: var(--primary-bright); background: var(--primary-mist); }
-.palette-name { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.5rem; }
+.palette-name { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.5rem;
+  display: flex; justify-content: space-between; align-items: center; gap: 0.3rem; }
 .palette-colors { display: flex; gap: 0.3rem; }
 .palette-colors span { width: 24px; height: 24px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.1); }
+
+/* v0.5.17: paletas guardadas del usuario */
+.palette-section-title {
+  font-size: 0.95rem; color: var(--ink);
+  margin: 0.5rem 0 0.7rem; font-weight: 700;
+}
+.palette-card-user {
+  background: linear-gradient(135deg, #fef3c7 0%, #fff 80%);
+  border-color: #f59e0b;
+}
+.palette-card-user.selected { border-color: #d97706; background: #fef3c7; }
+.palette-del {
+  background: rgba(220,38,38,0.1); color: #dc2626;
+  border: 0; border-radius: 50%;
+  width: 20px; height: 20px; line-height: 1;
+  cursor: pointer; font-size: 0.85rem; font-weight: 700;
+}
+.palette-del:hover { background: rgba(220,38,38,0.25); }
+
+/* v0.5.17: descripciones y preview de colores custom */
+.card-help {
+  color: var(--ink-mute); font-size: 0.88rem;
+  margin: -0.4rem 0 0.9rem; line-height: 1.45;
+}
+.custom-colors-help {
+  margin: 0.7rem 0 0; font-size: 0.88rem; color: var(--ink-mute);
+}
+.field-hint {
+  font-size: 0.78rem; color: var(--ink-mute);
+  margin: 0.35rem 0 0; line-height: 1.45;
+}
+.field-hint strong { color: var(--ink); }
+.custom-colors-preview {
+  margin-top: 1.2rem;
+  background: white; border: 1px solid var(--paper-deep);
+  border-radius: 10px; padding: 1rem;
+}
+.preview-label {
+  font-size: 0.78rem; color: var(--ink-mute); font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+.preview-mockup {
+  border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;
+}
+.preview-header {
+  color: white; padding: 0.9rem 1rem; font-weight: 700;
+  background: #0A2540;
+  transition: background 0.2s;
+}
+.preview-body {
+  padding: 1rem; background: #f9fafb;
+}
+.preview-body h4 {
+  margin: 0 0 0.4rem; font-size: 1.05rem;
+  color: #1D4ED8; transition: color 0.2s;
+}
+.preview-body p { margin: 0 0 0.7rem; font-size: 0.9rem; color: #374151; }
+.preview-callout {
+  background: white;
+  padding: 0.6rem 0.8rem;
+  border-left: 4px solid #1D4ED8;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  margin-bottom: 0.7rem;
+  transition: border-color 0.2s;
+}
+.preview-btn {
+  background: #2563EB;
+  color: white;
+  border: 0;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.save-palette-row {
+  margin-top: 1.2rem;
+  display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+  padding: 0.9rem; background: #f0fdf4; border: 1px solid #86efac;
+  border-radius: 8px;
+}
+.save-palette-row label {
+  font-size: 0.85rem; font-weight: 600; color: #166534;
+  width: 100%;
+}
+.save-palette-row input[type=text] {
+  flex: 1; min-width: 200px;
+  padding: 0.5rem 0.7rem; border: 1px solid #86efac;
+  border-radius: 6px; font-size: 0.9rem;
+}
+.btn-save-palette {
+  padding: 0.5rem 1rem; background: #16a34a; color: white;
+  border: 0; border-radius: 6px; cursor: pointer;
+  font-weight: 600; font-size: 0.9rem;
+}
+.btn-save-palette:hover { background: #15803d; }
+.save-palette-msg {
+  width: 100%; margin: 0; font-size: 0.85rem; padding: 0;
+}
+.save-palette-msg.ok { color: #166534; }
+.save-palette-msg.err { color: #b91c1c; }
 .toggle { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.7rem; }
 .toggle input { width: 18px; height: 18px; }
 .toggle label { font-size: 0.95rem; cursor: pointer; }
@@ -1945,53 +2258,85 @@ def _detect_ai_features(job_dir: Path) -> list[str]:
       ['📑 60 tags', '💬 12 callouts', '🧪 25 preg test', '💡 8 repaso', '📖 glosario', '🖼️ 46 alt-text']
     Si no hay mejoras detectables, devuelve [].
     """
-    structure_path = Path(job_dir) / "structure.json"
-    if not structure_path.exists():
-        return []
-    try:
-        with open(structure_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
+    info = _detect_ai_features_dict(job_dir)
     badges = []
-    topics = data.get("topics", []) or []
-    n_tags = sum(len(t.get("tags") or []) for t in topics)
-    if n_tags > 0:
-        badges.append(f"📑 {n_tags} tags")
-    n_callouts = 0
-    n_alt = 0
-    n_glossary_terms = 0
-    has_glossary_topic = False
-    for t in topics:
-        for sub in t.get("subsections", []) or []:
-            for b in sub.get("blocks", []) or []:
-                btype = b.get("type", "")
-                if btype in ("callout_key", "callout_alert", "callout_warn",
-                             "callout_success", "quote"):
-                    n_callouts += 1
-                if btype == "image" and (b.get("text") or "").strip():
-                    n_alt += 1
-        # Glosario: tema cuyo título sea "Glosario" o similar
-        if (t.get("title") or "").strip().lower() == "glosario":
-            has_glossary_topic = True
-            for sub in t.get("subsections", []) or []:
-                for b in sub.get("blocks", []) or []:
-                    if b.get("type") == "callout_key" and ":" in (b.get("text") or ""):
-                        n_glossary_terms += 1
-    if n_callouts > 0:
-        badges.append(f"💬 {n_callouts} callouts")
-    n_quiz_final = sum(len(t.get("quiz") or []) for t in topics)
-    if n_quiz_final > 0:
-        badges.append(f"🧪 {n_quiz_final} preg. test")
-    n_inline = sum(sum(len(v or []) for v in (t.get("inline_quiz") or {}).values())
-                   for t in topics)
-    if n_inline > 0:
-        badges.append(f"💡 {n_inline} preg. repaso")
-    if n_alt > 0:
-        badges.append(f"🖼️ {n_alt} alt-text")
-    if has_glossary_topic:
-        badges.append(f"📖 glosario ({n_glossary_terms})" if n_glossary_terms else "📖 glosario")
+    if info["tags"] > 0:
+        badges.append(f"📑 {info['tags']} tags")
+    if info["callouts"] > 0:
+        badges.append(f"💬 {info['callouts']} callouts")
+    if info["quiz"] > 0:
+        badges.append(f"🧪 {info['quiz']} preg. test")
+    if info["inline_quiz"] > 0:
+        badges.append(f"💡 {info['inline_quiz']} preg. repaso")
+    if info["alt"] > 0:
+        badges.append(f"🖼️ {info['alt']} alt-text")
+    if info["glossary"]:
+        badges.append(f"📖 glosario ({info['glossary_terms']})" if info["glossary_terms"] else "📖 glosario")
+    if info["tts"] > 0:
+        badges.append(f"🔊 {info['tts']} narraciones")
+    if info["aiken_extendido"] > 0:
+        badges.append(f"📚 {info['aiken_extendido']} bancos Aiken")
     return badges
+
+
+def _detect_ai_features_dict(job_dir: Path) -> dict:
+    """v0.5.17: devuelve dict con conteos por tipo de mejora IA aplicada.
+    
+    Usado por el editor para teñir de verde los botones correspondientes.
+    """
+    info = {
+        "tags": 0, "callouts": 0, "quiz": 0, "inline_quiz": 0,
+        "alt": 0, "glossary": False, "glossary_terms": 0,
+        "tts": 0, "aiken_extendido": 0,
+    }
+    structure_path = Path(job_dir) / "structure.json"
+    if structure_path.exists():
+        try:
+            with open(structure_path, encoding="utf-8") as f:
+                data = json.load(f)
+            topics = data.get("topics", []) or []
+            info["tags"] = sum(len(t.get("tags") or []) for t in topics)
+            for t in topics:
+                for sub in t.get("subsections", []) or []:
+                    for b in sub.get("blocks", []) or []:
+                        btype = b.get("type", "")
+                        if btype in ("callout_key", "callout_alert", "callout_warn",
+                                     "callout_success", "quote"):
+                            info["callouts"] += 1
+                        if btype == "image" and (b.get("text") or "").strip():
+                            info["alt"] += 1
+                        if btype == "audio":
+                            info["tts"] += 1
+                if (t.get("title") or "").strip().lower() == "glosario":
+                    info["glossary"] = True
+                    for sub in t.get("subsections", []) or []:
+                        for b in sub.get("blocks", []) or []:
+                            if b.get("type") == "callout_key" and ":" in (b.get("text") or ""):
+                                info["glossary_terms"] += 1
+            info["quiz"] = sum(len(t.get("quiz") or []) for t in topics)
+            info["inline_quiz"] = sum(
+                sum(len(v or []) for v in (t.get("inline_quiz") or {}).values())
+                for t in topics
+            )
+        except Exception:
+            pass
+    # TTS también puede estar como archivos sueltos (sin haberse guardado aún)
+    try:
+        salida = Path(job_dir) / "salida"
+        if salida.exists():
+            audio_files = list(salida.rglob("audio_*.mp3")) + list(salida.rglob("audio_*.wav"))
+            if audio_files and info["tts"] < len(audio_files):
+                info["tts"] = len(audio_files)
+    except Exception:
+        pass
+    # Aiken extendido: contar archivos en job_dir/aiken_extendido
+    try:
+        aext = Path(job_dir) / "aiken_extendido"
+        if aext.exists():
+            info["aiken_extendido"] = len(list(aext.glob("*.txt")))
+    except Exception:
+        pass
+    return info
 
 
 # ============================================================
@@ -2143,13 +2488,65 @@ import urllib.parse
 import urllib.error
 
 
+def _normalize_moodle_url(url: str) -> str:
+    """v0.5.17: normaliza la URL del Moodle. Si falta el esquema, añade https://.
+    
+    Esto evita el error 'unknown url type' que ocurre cuando el usuario pega
+    sólo el dominio (ej: 'aula.cgdformacion.com' en vez de 'https://aula.cgdformacion.com').
+    """
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return url
+    # Eliminar paths típicos que el usuario podría haber copiado
+    for suffix in ("/login/index.php", "/index.php", "/my/", "/login/", "/my"):
+        if url.endswith(suffix):
+            url = url[:-len(suffix)].rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+def _parse_moodle_error_response(body: str) -> Optional[str]:
+    """v0.5.17: extrae un mensaje legible de un body de error de Moodle.
+    
+    Moodle a veces devuelve errores en XML aunque le pidamos JSON
+    (típicamente con tokens inválidos: devuelve XML con <ERRORCODE> y <MESSAGE>).
+    Esta función intenta parsear el XML y devolver un mensaje claro.
+    """
+    if not body:
+        return None
+    body = body.strip()
+    # Intentar parseo XML simple
+    if body.startswith("<?xml") or body.startswith("<EXCEPTION") or "<MESSAGE>" in body:
+        try:
+            import xml.etree.ElementTree as ET
+            # Wrappear si hace falta
+            root = ET.fromstring(body)
+            errorcode = ""
+            message = ""
+            # Buscar tags ERRORCODE y MESSAGE en cualquier nivel
+            for elem in root.iter():
+                tag = elem.tag.lower()
+                if tag == "errorcode" and elem.text:
+                    errorcode = elem.text.strip()
+                elif tag == "message" and elem.text:
+                    message = elem.text.strip()
+            if message:
+                return f"{errorcode}: {message}" if errorcode else message
+            if errorcode:
+                return errorcode
+        except Exception:
+            pass
+    return None
+
+
 def _moodle_ws_call(moodle_url: str, token: str, function: str,
                     params: Optional[dict] = None, timeout: int = 30):
     """Llama a una función Moodle Web Service REST.
     
     Devuelve el JSON decodificado. Lanza Exception con mensaje útil si falla.
     """
-    moodle_url = moodle_url.rstrip("/")
+    moodle_url = _normalize_moodle_url(moodle_url)
     url = f"{moodle_url}/webservice/rest/server.php"
     data = {
         "wstoken": token,
@@ -2168,10 +2565,17 @@ def _moodle_ws_call(moodle_url: str, token: str, function: str,
         raise Exception(f"Error HTTP de Moodle ({e.code}): {e.reason}")
     except urllib.error.URLError as e:
         raise Exception(f"No se pudo conectar a Moodle: {e.reason}")
+    except ValueError as e:
+        # 'unknown url type' viene como ValueError si la URL es mala
+        raise Exception(f"URL de Moodle no válida: {e}. Asegúrate de incluir https://")
     try:
         result = json.loads(body)
     except json.JSONDecodeError:
-        raise Exception(f"Respuesta inválida de Moodle (no es JSON): {body[:200]}")
+        # v0.5.17: si no es JSON, intentar parsear como XML (típico de tokens inválidos)
+        xml_msg = _parse_moodle_error_response(body)
+        if xml_msg:
+            raise Exception(f"Moodle: {xml_msg}")
+        raise Exception(f"Respuesta inválida de Moodle (no es JSON ni XML reconocible): {body[:200]}")
     # Detectar error de Moodle: {"exception": "...", "errorcode": "...", "message": "..."}
     if isinstance(result, dict) and result.get("exception"):
         msg = result.get("message", "") or result.get("errorcode", "")
@@ -2186,7 +2590,7 @@ def _moodle_upload_file(moodle_url: str, token: str, file_path: Path,
     Devuelve el itemid del draftfile creado, que sirve para referenciarlo
     al crear un módulo SCORM.
     """
-    moodle_url = moodle_url.rstrip("/")
+    moodle_url = _normalize_moodle_url(moodle_url)
     url = (f"{moodle_url}/webservice/upload.php"
            f"?token={urllib.parse.quote(token)}&filearea=draft&itemid=0")
     # multipart/form-data manual
@@ -2438,7 +2842,7 @@ def moodle_config_save(token):
     """Guarda/actualiza la config Moodle para este curso."""
     user = current_user()
     payload = request.get_json(silent=True) or {}
-    moodle_url = (payload.get("moodle_url") or "").strip().rstrip("/")
+    moodle_url = _normalize_moodle_url(payload.get("moodle_url") or "")
     moodle_token = (payload.get("moodle_token") or "").strip()
     try:
         moodle_courseid = int(payload.get("moodle_courseid") or 0)
@@ -2503,7 +2907,7 @@ def moodle_test(token):
     """
     user = current_user()
     payload = request.get_json(silent=True) or {}
-    moodle_url = (payload.get("moodle_url") or "").strip().rstrip("/")
+    moodle_url = _normalize_moodle_url(payload.get("moodle_url") or "")
     moodle_token = (payload.get("moodle_token") or "").strip()
 
     if not moodle_url or not moodle_token:
@@ -2745,6 +3149,108 @@ def moodle_upload(token):
     return jsonify({"job_id": job_id, "total": len(units)})
 
 
+# ============================================================
+# v0.5.17: Paletas de colores personalizadas guardadas por usuario
+# ============================================================
+
+def _is_valid_hex_color(s: str) -> bool:
+    """True si s es un color hexadecimal válido (#RRGGBB o #RGB)."""
+    if not s or not isinstance(s, str):
+        return False
+    s = s.strip()
+    if not s.startswith("#"):
+        return False
+    s = s[1:]
+    if len(s) not in (3, 6):
+        return False
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+
+@app.route("/api/paletas", methods=["GET"])
+@login_required
+def palettes_list():
+    """Lista las paletas personalizadas del usuario actual."""
+    user = current_user()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, name, color_deep, color_primary, color_bright, created_at
+               FROM user_palettes WHERE user_id = ?
+               ORDER BY created_at DESC""",
+            (user["id"],),
+        ).fetchall()
+    return jsonify({
+        "palettes": [
+            {"id": r["id"], "name": r["name"],
+             "color_deep": r["color_deep"],
+             "color_primary": r["color_primary"],
+             "color_bright": r["color_bright"],
+             "created_at": r["created_at"]}
+            for r in rows
+        ]
+    })
+
+
+@app.route("/api/paletas", methods=["POST"])
+@login_required
+def palettes_save():
+    """Guarda una nueva paleta personalizada del usuario actual."""
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()[:60]
+    deep = (payload.get("color_deep") or "").strip()
+    primary = (payload.get("color_primary") or "").strip()
+    bright = (payload.get("color_bright") or "").strip()
+
+    if not name:
+        return jsonify({"error": "El nombre es obligatorio (ej: 'Marca corporativa')"}), 400
+    for label, val in [("color cabecera", deep), ("color primario", primary), ("color brillante", bright)]:
+        if not _is_valid_hex_color(val):
+            return jsonify({"error": f"El {label} no es un color hex válido (formato #RRGGBB): '{val}'"}), 400
+
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM user_palettes WHERE user_id = ? AND name = ?",
+            (user["id"], name),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE user_palettes
+                   SET color_deep = ?, color_primary = ?, color_bright = ?
+                   WHERE id = ?""",
+                (deep, primary, bright, existing["id"]),
+            )
+            new_id = existing["id"]
+        else:
+            cur = conn.execute(
+                """INSERT INTO user_palettes
+                   (user_id, name, color_deep, color_primary, color_bright, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user["id"], name, deep, primary, bright,
+                 datetime.utcnow().isoformat()),
+            )
+            new_id = cur.lastrowid
+        conn.commit()
+    return jsonify({"ok": True, "id": new_id, "name": name})
+
+
+@app.route("/api/paletas/<int:palette_id>", methods=["DELETE"])
+@login_required
+def palettes_delete(palette_id):
+    """Borra una paleta personalizada del usuario."""
+    user = current_user()
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM user_palettes WHERE id = ? AND user_id = ?",
+            (palette_id, user["id"]),
+        )
+        conn.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/biblioteca")
 @login_required
 def library():
@@ -2803,8 +3309,9 @@ def library():
             if is_shared:
                 permission = r["permission"]
                 owner = r["owner_name"] or r["owner_email"]
+                # v0.5.18: escape HTML para prevenir XSS
                 share_banner = (f'<div class="share-banner share-in">🔗 Compartido por '
-                                f'<strong>{owner}</strong> · permiso: '
+                                f'<strong>{html_escape(owner)}</strong> · permiso: '
                                 f'{"editar" if permission == "edit" else "ver"}</div>')
                 edit_btn = (f'<a class="btn secondary" href="/curso/{r["token"]}/editar">Editar</a>'
                             if permission == "edit" else "")
@@ -2812,14 +3319,19 @@ def library():
                            f'<a class="btn secondary" href="/curso/{r["token"]}">Detalle</a>'
                            f'{edit_btn}')
             else:
-                title_js = (r['title'] or 'curso').replace("'", "\\'").replace('"', '&quot;')
+                # v0.5.18: doble escape — JSON-encode (escapa caracteres JS) +
+                # html_escape (convierte " a &quot; para no romper el atributo
+                # onclick que usa comillas dobles). Sin esto, un título con
+                # <script> rompía el atributo y se ejecutaba.
+                title_js = html_escape(json.dumps(r['title'] or 'curso'), quote=True)
+                token_js = html_escape(json.dumps(r["token"]), quote=True)
                 share_banner = ""
                 actions = (
                     f'<a class="btn" href="/api/descargar/{r["token"]}">Descargar ZIP</a>'
                     f'<a class="btn secondary" href="/curso/{r["token"]}">Detalle</a>'
                     f'<a class="btn secondary" href="/curso/{r["token"]}/editar">Editar</a>'
                     f'<button type="button" class="btn secondary" '
-                    f'onclick="openShareDialog(\'{r["token"]}\', \'{title_js}\')">🔗 Compartir</button>'
+                    f'onclick="openShareDialog({token_js}, {title_js})">🔗 Compartir</button>'
                     f'<form method="post" action="/curso/{r["token"]}/borrar" style="display:inline;" '
                     f'onsubmit="return confirm(\'¿Borrar este curso definitivamente?\')">'
                     f'<button type="submit" class="btn danger">Borrar</button>'
@@ -2828,7 +3340,7 @@ def library():
             return f"""
             <div class="course-card{' has-ai' if ai_badges else ''}{' shared-in' if is_shared else ''}">
               {share_banner}
-              <h3>{(r['title'] or 'Sin título')}</h3>
+              <h3>{html_escape(r['title'] or 'Sin título')}</h3>
               <div class="course-meta">
                 <span>{r['num_topics'] or 0} tema(s)</span>
                 <span>{r['num_questions'] or 0} preg.</span>
@@ -2995,9 +3507,9 @@ def course_detail(token):
         </div>"""
     body = f"""
     <div class="card">
-      <h2>{row['title']}</h2>
+      <h2>{html_escape(row['title'])}</h2>
       <p style="color:var(--ink-mute); margin-bottom:1.2rem;">
-        Generado el {row['created_at'][:16].replace('T', ' ')} · Autor: {row['author'] or '—'}
+        Generado el {row['created_at'][:16].replace('T', ' ')} · Autor: {html_escape(row['author'] or '—')}
       </p>
       <div style="display:flex; flex-wrap:wrap; gap: 0.7rem; margin-bottom: 1rem;">
         <span class="course-meta-pill">{row['num_topics']} tema(s)</span>
@@ -3087,6 +3599,10 @@ def course_edit(token):
         push_flash("error", "Este curso no tiene estructura editable. Vuelve a generar el curso para activar la edición.")
         return redirect(f"/curso/{token}")
 
+    # v0.5.17: detectar mejoras IA ya aplicadas para teñir botones
+    ai_features = _detect_ai_features_dict(Path(row["zip_path"]).parent)
+    ai_features_json = json.dumps(ai_features)
+
     body = f"""
     <div class="topbar-page">
       <h1>Editar curso</h1>
@@ -3148,6 +3664,8 @@ def course_edit(token):
     const TOKEN = "{token}";
     const API_GET = "/api/curso/" + TOKEN + "/structure";
     const API_SAVE = "/api/curso/" + TOKEN + "/save";
+    // v0.5.17: features IA ya aplicadas (para teñir los botones de verde)
+    let AI_FEATURES = {ai_features_json};
 
     let course = null;
     let courseSnapshot = null;  // copia del estado guardado para detectar cambios y restaurar
@@ -3295,6 +3813,48 @@ def course_edit(token):
 
     function setStatus(msg) {{
       document.querySelectorAll('.ed-status').forEach(s => s.textContent = msg);
+    }}
+
+    // v0.5.17: aplicar visualmente qué mejoras IA ya están aplicadas (botones verdes)
+    function applyAiFeatureBadges() {{
+      const f = AI_FEATURES || {{}};
+      // Mapeo: clase de botón → key en AI_FEATURES → texto a añadir
+      const mapping = [
+        {{ cls: 'ed-act-tags-ia', key: 'tags', label: 'tags' }},
+        {{ cls: 'ed-act-callouts', key: 'callouts', label: 'callouts' }},
+        {{ cls: 'ed-act-glossary', key: 'glossary', label: 'glosario', bool: true }},
+        {{ cls: 'ed-act-alt-text-all', key: 'alt', label: 'alt-text' }},
+        {{ cls: 'ed-act-tts', key: 'tts', label: 'narraciones' }},
+        {{ cls: 'ed-act-aiken-ext', key: 'aiken_extendido', label: 'bancos Aiken' }},
+        {{ cls: 'ed-act-quiz-ia', key: 'quiz', label: 'preguntas' }},
+        {{ cls: 'ed-act-inline-ia', key: 'inline_quiz', label: 'repaso' }},
+      ]; 
+      mapping.forEach(m => {{
+        const val = f[m.key];
+        const generated = m.bool ? !!val : (val && val > 0);
+        if (generated) {{
+          document.querySelectorAll('.' + m.cls).forEach(btn => {{
+            btn.classList.add('btn-ai-generated');
+            const count = m.bool ? '' : ' (' + val + ')';
+            // Tooltip con conteo
+            const original = btn.getAttribute('title') || '';
+            btn.setAttribute('title', '✓ Ya generado · ' + (val || '') + ' ' + m.label + ' · ' + original);
+            // Añadir marca visual ✓
+            if (!btn.querySelector('.ai-check')) {{
+              const check = document.createElement('span');
+              check.className = 'ai-check';
+              check.textContent = ' ✓';
+              btn.appendChild(check);
+            }}
+          }});
+        }}
+      }});
+      // El botón "Aiken zip" del bloque exportar también se tiñe verde si hay archivos
+      if (f.aiken_extendido > 0 || f.inline_quiz > 0 || f.quiz > 0) {{
+        document.querySelectorAll('.ed-act-download-aiken').forEach(btn => {{
+          btn.classList.add('btn-aiken-ready');
+        }});
+      }}
     }}
 
     // ====================================================================
@@ -3717,6 +4277,8 @@ def course_edit(token):
       root.innerHTML = html;
       // Bind de los botones (top y bottom comparten las mismas clases data-action)
       bindAllActions();
+      // v0.5.17: marcar botones IA como "generado" según AI_FEATURES
+      applyAiFeatureBadges();
 
       // ----- Botones de quiz (generar / añadir) -----
       document.querySelectorAll('.btn-ai[data-mode], .btn-ai-mini[data-mode]').forEach(btn => {{
@@ -3895,8 +4457,14 @@ def course_edit(token):
               msg += '  • ⚠ ' + s.errors.length + ' con error\\n';
               msg += '\\nPrimeros errores:\\n' + s.errors.slice(0,3).join('\\n');
             }}
-            alert(msg);
-            setStatus('✓ ' + (s.generated || 0) + ' narraciones generadas. Pulsa "💾 Guardar y reempaquetar" para incluirlas en el SCORM final.');
+            msg += '\\n\\n¿Reempaquetar el SCORM ahora para incluir los audios?';
+            if (confirm(msg)) {{
+              // Hacer un save automático para meter audios en el SCORM
+              const saveBtn = document.querySelector('.ed-act-save');
+              if (saveBtn) saveBtn.click();
+            }} else {{
+              setStatus('✓ ' + (s.generated || 0) + ' narraciones generadas. Pulsa "💾 Guardar y reempaquetar" para incluirlas.');
+            }}
           }} catch (e) {{
             alert('Error: ' + e.message);
           }}
@@ -5286,6 +5854,26 @@ def course_edit(token):
     }}
     .btn-ai:hover:not(:disabled) {{ filter: brightness(1.1); }}
     .btn-ai:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+    /* v0.5.17: botón IA cuando la mejora YA está aplicada → verde con check */
+    .btn-ai.btn-ai-generated {{
+      background: linear-gradient(135deg, #16a34a, #15803d) !important;
+      box-shadow: 0 1px 3px rgba(22,163,74,0.4);
+    }}
+    .btn-ai.btn-ai-generated:hover:not(:disabled) {{ filter: brightness(1.08); }}
+    .btn-ai .ai-check {{
+      display: inline-block; margin-left: 0.3rem;
+      font-weight: 700; color: rgba(255,255,255,0.95);
+    }}
+    /* v0.5.17: botón "Aiken (.zip)" en color verde cuando hay preguntas para descargar */
+    .btn.secondary.ed-act-download-aiken.btn-aiken-ready {{
+      background: #d1fae5 !important;
+      color: #065f46 !important;
+      border-color: #16a34a !important;
+      font-weight: 700;
+    }}
+    .btn.secondary.ed-act-download-aiken.btn-aiken-ready:hover {{
+      background: #a7f3d0 !important;
+    }}
     .btn-ai-mini {{
       background: var(--primary-pale); color: var(--primary-deep); border: 1px solid var(--primary);
       padding: 0.25rem 0.6rem; border-radius: 4px; cursor: pointer;
@@ -6400,6 +6988,18 @@ def course_structure_save(token):
                     )
                 except Exception as e:
                     _bg_logger.warning(f"v0.5.11: estructura unidad {idx_str}: {e}")
+
+                # v0.5.17: regenerar PDF de esta unidad con recursos locales
+                # para que las imágenes aparezcan en el PDF descargado
+                try:
+                    from scorm_builder.pdf_builder import build_pdf
+                    pdf_dir = unit_dir / "pdfs"
+                    pdf_dir.mkdir(exist_ok=True)
+                    pdf_path = pdf_dir / f"apuntes_T{topic.number:02d}.pdf"
+                    build_pdf(topic, course, theme_obj, pdf_path,
+                              recursos_dir=unit_recursos)
+                except Exception as e:
+                    _bg_logger.warning(f"v0.5.17: PDF unidad {idx_str}: {e}")
         except Exception as e:
             return jsonify({"error": f"Error reempaquetando modo batch: {e}"}), 500
 
@@ -6427,7 +7027,7 @@ def course_structure_save(token):
                 output_dir=target_dir,
                 theme=course.metadata.palette,
                 recursos_dir=recursos_dir,
-                generate_pdfs=False,
+                generate_pdfs=True,    # v0.5.17: regenerar PDFs con imágenes
                 generate_aiken=False,
             )
         except Exception as e:
@@ -7769,13 +8369,42 @@ def course_export_imscp(token):
     theme = get_theme(course.metadata.palette)
     htmls = render_html(course, theme)
 
-    # Buscar recursos asociados al curso (PDFs, imágenes, etc.)
+    # v0.5.17: buscar recursos REALES en las carpetas correctas:
+    # - modo batch: salida/unidad_NN_*/recursos/  (consolidamos en una temporal)
+    # - modo single: salida/curso/recursos/
+    # Antes buscaba en course_dir/recursos que NO existe nunca.
     course_dir = Path(row["zip_path"]).parent
-    recursos_dir = course_dir / "recursos"
-    recursos_arg = recursos_dir if recursos_dir.exists() else None
+    output_dir = course_dir / "salida"
+    recursos_arg = None
+    consolidated_recursos = None  # carpeta temporal a limpiar
+    if output_dir.exists():
+        unit_dirs = sorted(output_dir.glob("unidad_*"))
+        if unit_dirs:
+            # Modo batch: consolidamos imágenes de TODAS las unidades en una temporal
+            consolidated_recursos = course_dir / "_imscp_recursos_tmp"
+            if consolidated_recursos.exists():
+                shutil.rmtree(consolidated_recursos)
+            consolidated_recursos.mkdir(parents=True)
+            for ud in unit_dirs:
+                ur = ud / "recursos"
+                if ur.exists():
+                    for f in ur.iterdir():
+                        if f.is_file():
+                            try:
+                                shutil.copy2(f, consolidated_recursos / f.name)
+                            except Exception:
+                                pass
+            recursos_arg = consolidated_recursos
+        elif (output_dir / "curso" / "recursos").exists():
+            recursos_arg = output_dir / "curso" / "recursos"
 
     out_zip = course_dir / "curso_imscp.zip"
-    export_ims_cp(course, htmls, out_zip, recursos_dir=recursos_arg)
+    try:
+        export_ims_cp(course, htmls, out_zip, recursos_dir=recursos_arg)
+    finally:
+        # Limpiar carpeta temporal
+        if consolidated_recursos and consolidated_recursos.exists():
+            shutil.rmtree(consolidated_recursos, ignore_errors=True)
 
     return jsonify({"ok": True, "filename": out_zip.name})
 
@@ -8289,11 +8918,12 @@ def course_tts(token):
         return jsonify({"error": "Curso sin estructura editable"}), 404
 
     try:
-        from scorm_builder.tts import synthesize, subsection_to_text, tts_available
+        from scorm_builder.tts import synthesize, subsection_to_text, tts_available, tts_engine_info
     except ImportError as e:
         return jsonify({"error": f"Módulo TTS no disponible: {e}"}), 500
     if not tts_available():
-        return jsonify({"error": "pyttsx3 no instalado en el servidor."}), 400
+        engine_name, info_msg = tts_engine_info()
+        return jsonify({"error": f"No hay motor TTS instalado. {info_msg}"}), 400
 
     # Contar subapartados totales para reportar progreso
     total_subs = sum(
@@ -8360,12 +8990,15 @@ def course_tts(token):
                     if not text.strip():
                         skipped += 1
                         continue
-                    filename = f"audio_T{ti+1:02d}_{si+1:02d}.wav"
-                    target = target_recursos / filename
+                    # v0.5.17: gTTS produce .mp3, pyttsx3 produce .wav.
+                    # synthesize() ajusta la extensión y devuelve la ruta real.
+                    target_base = target_recursos / f"audio_T{ti+1:02d}_{si+1:02d}.mp3"
                     try:
-                        result = synthesize(text, target, language="es")
+                        result = synthesize(text, target_base, language="es")
                         if result:
                             generated += 1
+                            # Usar el nombre real (con la extensión que devolvió)
+                            filename = Path(result).name
                             has_audio = any(
                                 b.get("type") == "audio" and (b.get("extras", {}).get("src") == filename)
                                 for b in sub.get("blocks", [])
@@ -9305,27 +9938,38 @@ def api_descargar_aiken(token):
         abort(404)
     job_dir = Path(row["zip_path"]).parent
     output_dir = job_dir / "salida"
-    if not output_dir.exists():
-        return jsonify({"error": "El curso no tiene carpeta de salida"}), 404
 
-    # Recolectar todos los .txt de aiken
+    # v0.5.17: el endpoint busca también en job_dir/aiken_extendido porque el
+    # comando "📚 Banco Aiken IA" (ai-aiken-extendido) guarda ahí los archivos,
+    # NO en salida/aiken_extendido. Esto era el bug que reportó Rosario:
+    # los archivos se generaban pero el endpoint no los encontraba.
     aiken_files = []
+    # 1) Carpetas a nivel de job_dir (donde guarda ai-aiken-extendido)
     for search_dir in [
-        output_dir / "aiken",
-        output_dir / "aiken_extendido",
-        output_dir / "curso" / "aiken",
-        output_dir / "curso" / "aiken_extendido",
+        job_dir / "aiken_extendido",
+        job_dir / "aiken",
     ]:
         if search_dir.exists():
             for f in search_dir.glob("*.txt"):
                 aiken_files.append((f, f"{search_dir.name}/{f.name}"))
-    # En modo batch, recorrer cada unidad
-    for unit_dir in sorted(output_dir.glob("unidad_*")):
-        unit_name = unit_dir.name
-        for search_dir in [unit_dir / "aiken", unit_dir / "aiken_extendido"]:
+    # 2) Carpetas dentro de output_dir (donde guarda la generación inicial)
+    if output_dir.exists():
+        for search_dir in [
+            output_dir / "aiken",
+            output_dir / "aiken_extendido",
+            output_dir / "curso" / "aiken",
+            output_dir / "curso" / "aiken_extendido",
+        ]:
             if search_dir.exists():
                 for f in search_dir.glob("*.txt"):
-                    aiken_files.append((f, f"{unit_name}/{search_dir.name}/{f.name}"))
+                    aiken_files.append((f, f"{search_dir.name}/{f.name}"))
+        # 3) En modo batch, recorrer cada unidad
+        for unit_dir in sorted(output_dir.glob("unidad_*")):
+            unit_name = unit_dir.name
+            for search_dir in [unit_dir / "aiken", unit_dir / "aiken_extendido"]:
+                if search_dir.exists():
+                    for f in search_dir.glob("*.txt"):
+                        aiken_files.append((f, f"{unit_name}/{search_dir.name}/{f.name}"))
 
     if not aiken_files:
         return jsonify({
