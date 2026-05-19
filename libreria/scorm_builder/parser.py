@@ -117,6 +117,9 @@ class Topic:
     # v0.5 Fase 2: preguntas intercaladas por subapartado, mapeo {sub_id: [Question, ...]}.
     # Se renderizan al final de cada subapartado correspondiente.
     inline_quiz: Dict[str, List["Question"]] = field(default_factory=dict)
+    # v0.6: archivo de audio generado por TTS para ESTE tema (un audio por tema).
+    # Si está, se añade el botón "Descargar audio del tema" en la cabecera SCORM.
+    audio_filename: Optional[str] = None
 
 
 @dataclass
@@ -162,6 +165,7 @@ class CourseStructure:
                     "title": t.title,
                     "intro": t.intro,
                     "tags": list(t.tags),
+                    "audio_filename": t.audio_filename,
                     "subsections": [
                         {
                             "id": s.id,

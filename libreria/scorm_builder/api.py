@@ -26,6 +26,71 @@ from scorm_builder.pdf_builder import build_pdf
 logger = logging.getLogger(__name__)
 
 
+def convert_image_tables(course: CourseStructure, images_dir: Path) -> int:
+    """Recorre todos los bloques IMAGE del curso y los convierte en TABLE
+    si la imagen resulta ser una tabla detectable por OCR.
+
+    v0.6: usa scorm_builder.table_ocr.analyze_image_for_table. Si la confianza
+    es alta y se extrae una tabla con texto, sustituye el block.
+
+    Returns: número de imágenes convertidas.
+    """
+    try:
+        from scorm_builder.table_ocr import analyze_image_for_table
+        from scorm_builder.parser import BlockType, Block
+    except ImportError:
+        return 0
+
+    converted = 0
+    for topic in course.topics:
+        for sub in topic.subsections:
+            new_blocks = []
+            for b in sub.blocks:
+                bt = b.type if not isinstance(b.type, str) else BlockType(b.type)
+                if bt != BlockType.IMAGE:
+                    new_blocks.append(b)
+                    continue
+                src = (b.extras or {}).get("src") or (b.extras or {}).get("file")
+                if not src:
+                    new_blocks.append(b)
+                    continue
+                img_path = Path(images_dir) / src
+                if not img_path.exists():
+                    new_blocks.append(b)
+                    continue
+                try:
+                    result = analyze_image_for_table(img_path, lang="spa")
+                except Exception as e:
+                    logger.debug(f"OCR de tabla en {src} falló: {e}")
+                    result = None
+                if result and result.is_table and result.rows:
+                    logger.info(
+                        f"Imagen '{src}' detectada como TABLA "
+                        f"(confianza {result.confidence}, "
+                        f"{result.n_rows}×{result.n_cols})"
+                    )
+                    # Sustituir IMAGE por TABLE
+                    caption = b.text or ""
+                    new_blocks.append(Block(
+                        type=BlockType.TABLE,
+                        text=caption,
+                        rows=[list(r) for r in result.rows],
+                        extras={"converted_from_image": src,
+                                "ocr_confidence": str(result.confidence)},
+                    ))
+                    course.warnings.append(
+                        f"La imagen '{src}' se convirtió automáticamente en "
+                        f"tabla editable ({result.n_rows} filas × "
+                        f"{result.n_cols} columnas, confianza {result.confidence}%). "
+                        f"Revisa el texto: el OCR puede tener errores."
+                    )
+                    converted += 1
+                else:
+                    new_blocks.append(b)
+            sub.blocks = new_blocks
+    return converted
+
+
 @dataclass
 class BuildResult:
     """Resultado de una construcción completa."""
@@ -143,6 +208,32 @@ def build_complete_course(
     logger.info(f"Parseando {docx_path}...")
     images_dir = output_dir / "_extracted_images"
     course = parse_docx(docx_path, images_dir=images_dir)
+
+    # v0.6: procesar imágenes extraídas (upscale + aviso si siguen siendo pequeñas)
+    if course.extracted_images_dir and Path(course.extracted_images_dir).exists():
+        try:
+            from scorm_builder.image_utils import process_images_in_dir
+            upscaled, small_warnings = process_images_in_dir(
+                Path(course.extracted_images_dir), upscale=True
+            )
+            if upscaled:
+                logger.info(f"Upscaleadas {len(upscaled)} imagen(es) pequeña(s): {upscaled}")
+                course.warnings.append(
+                    f"Se reescalaron automáticamente {len(upscaled)} imagen(es) pequeña(s) "
+                    f"a {1200}px de ancho. Si quieres mejor calidad, reemplaza los originales."
+                )
+            for w in small_warnings:
+                course.warnings.append(f"[Imagen baja resolución] {w}")
+        except Exception as e:
+            logger.warning(f"No se pudo procesar imágenes: {e}")
+
+        # v0.6: detectar imágenes que en realidad son tablas y convertirlas
+        try:
+            from scorm_builder.table_ocr import analyze_image_for_table
+            convert_image_tables(course, Path(course.extracted_images_dir))
+        except Exception as e:
+            logger.warning(f"No se pudo analizar imágenes para detección de tablas: {e}")
+
     if title_override:
         course.metadata.title = title_override
     if author_override:
@@ -209,9 +300,14 @@ def build_complete_course(
             theme_obj = get_theme(theme)
 
     # 3. Generar PDFs (antes del render para conocer los nombres y añadir el botón)
+    # v0.6: pasamos la carpeta de imágenes extraídas para que el PDF las incluya.
     pdf_files: List[Path] = []
     pdf_filenames: Dict[int, str] = {}
     descargas_dir: Optional[Path] = None
+    # Recursos para el PDF: imágenes ya extraídas del docx + extras de usuario
+    pdf_recursos_dir: Optional[Path] = None
+    if course.extracted_images_dir and Path(course.extracted_images_dir).exists():
+        pdf_recursos_dir = Path(course.extracted_images_dir)
     if generate_pdfs and course.topics:
         logger.info("Generando PDFs descargables...")
         descargas_dir = output_dir / "_descargas_temp"
@@ -220,7 +316,7 @@ def build_complete_course(
             try:
                 pdf_name = f"apuntes_T{topic.number:02d}.pdf"
                 pdf_path = descargas_dir / pdf_name
-                build_pdf(topic, course, theme_obj, pdf_path)
+                build_pdf(topic, course, theme_obj, pdf_path, recursos_dir=pdf_recursos_dir)
                 pdf_files.append(pdf_path)
                 pdf_filenames[topic.number] = pdf_name
             except Exception as e:
@@ -246,9 +342,20 @@ def build_complete_course(
     except ImportError:
         pass  # módulo no disponible (no debería pasar)
 
-    # 4. Renderizar HTMLs (con botones PDF si se generaron)
+    # 4. Renderizar HTMLs (con botones PDF/audio si están disponibles)
     logger.info(f"Renderizando {len(course.topics)} temas con paleta '{theme_obj.name}'...")
-    htmls = render_html(course, theme_obj, pdf_filenames=pdf_filenames)
+    # v0.6: si los temas ya tienen audio_filename (porque se rebuild tras
+    # generar TTS), pasarlos al render para que aparezca el botón "Descargar
+    # audio del tema" en la cabecera.
+    audio_filenames: Dict[int, str] = {}
+    for topic in course.topics:
+        if getattr(topic, "audio_filename", None):
+            audio_filenames[topic.number] = topic.audio_filename
+    htmls = render_html(
+        course, theme_obj,
+        pdf_filenames=pdf_filenames,
+        audio_filenames=audio_filenames or None,
+    )
 
     # 5. Generar Aiken
     aiken_files: List[Path] = []
@@ -384,16 +491,32 @@ def rebuild_from_structure(
         else:
             theme_obj = get_theme(theme)
 
-    htmls = render_html(course, theme_obj)
+    # v0.6: si los temas ya tienen audio_filename, y si vamos a regenerar
+    # PDFs, propagar ambos al render para los botones de descarga.
+    pdf_filenames_rb: Dict[int, str] = {}
+    audio_filenames_rb: Dict[int, str] = {}
+    if generate_pdfs:
+        for topic in course.topics:
+            pdf_filenames_rb[topic.number] = f"apuntes_T{topic.number:02d}.pdf"
+    for topic in course.topics:
+        if getattr(topic, "audio_filename", None):
+            audio_filenames_rb[topic.number] = topic.audio_filename
+    htmls = render_html(
+        course, theme_obj,
+        pdf_filenames=pdf_filenames_rb or None,
+        audio_filenames=audio_filenames_rb or None,
+    )
 
     pdf_files = []
     if generate_pdfs:
         pdf_dir = output_dir / "pdfs"
         pdf_dir.mkdir(exist_ok=True)
+        # v0.6: usar recursos_dir para que el PDF incluya las imágenes
+        pdf_recursos_dir = Path(recursos_dir) if recursos_dir else None
         for topic in course.topics:
             try:
                 pdf_path = pdf_dir / f"apuntes_T{topic.number:02d}.pdf"
-                build_pdf(topic, course, theme_obj, pdf_path)
+                build_pdf(topic, course, theme_obj, pdf_path, recursos_dir=pdf_recursos_dir)
                 pdf_files.append(pdf_path)
             except Exception as e:
                 logger.warning(f"PDF tema {topic.number} falló: {e}")
@@ -448,6 +571,7 @@ def course_from_dict(data: dict) -> CourseStructure:
             title=t_data.get("title", ""),
             intro=t_data.get("intro"),
             tags=list(t_data.get("tags", []) or []),
+            audio_filename=t_data.get("audio_filename"),
         )
         for s_data in t_data.get("subsections", []):
             sub = Subsection(

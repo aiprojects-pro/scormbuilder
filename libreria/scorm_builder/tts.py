@@ -145,3 +145,59 @@ def subsection_to_text(subsection) -> str:
             for it in (b.items or []):
                 parts.append(it + ".")
     return " ".join(parts)
+
+
+def topic_to_text(topic) -> str:
+    """Aplana un TEMA completo a texto plano para narrar (v0.6).
+
+    Genera un único audio por tema. Concatena título, intro y todos los
+    subapartados en orden. Acepta tanto Topic dataclass como dict con la
+    misma forma (para uso desde JSON serializado).
+    """
+    parts = []
+    # Soportar tanto objeto como dict
+    def _g(o, key, default=None):
+        if isinstance(o, dict):
+            return o.get(key, default)
+        return getattr(o, key, default)
+
+    title = _g(topic, "title")
+    if title:
+        parts.append(title + ".")
+    intro = _g(topic, "intro")
+    if intro:
+        parts.append(intro)
+    subs = _g(topic, "subsections", []) or []
+    for sub in subs:
+        sub_title = _g(sub, "title")
+        if sub_title:
+            parts.append(sub_title + ".")
+        blocks = _g(sub, "blocks", []) or []
+        for b in blocks:
+            bt_val = _g(b, "type")
+            bt = bt_val.value if hasattr(bt_val, "value") else bt_val
+            if bt in ("paragraph", "heading_3", "heading_4",
+                      "callout_key", "callout_alert", "callout_success",
+                      "callout_warn", "quote", "example"):
+                txt = _g(b, "text")
+                if txt:
+                    parts.append(txt)
+            elif bt in ("list_bullet", "list_number"):
+                items = _g(b, "items", []) or []
+                for it in items:
+                    parts.append(it + ".")
+            elif bt == "table":
+                # Aplanar tabla: leemos filas como "cabecera1: valor1, cabecera2: valor2..."
+                rows = _g(b, "rows", []) or []
+                if len(rows) >= 2:
+                    headers = rows[0]
+                    for row in rows[1:]:
+                        cells = []
+                        for ci, c in enumerate(row):
+                            h = headers[ci] if ci < len(headers) else ""
+                            if h:
+                                cells.append(f"{h}: {c}")
+                            else:
+                                cells.append(str(c))
+                        parts.append("; ".join(cells) + ".")
+    return " ".join(parts)

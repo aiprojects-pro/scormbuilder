@@ -428,7 +428,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.5.18</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.6.4</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -839,14 +839,20 @@ HOME_BODY_TEMPLATE = """
 
   <!-- Bloque 6: Recursos multimedia subidos -->
   <div class="card">
-    <h2><span class="num">6</span> Recursos multimedia <span style="font-weight:400;color:var(--ink-mute);font-size:0.8rem;">(opcional)</span></h2>
+    <h2><span class="num">6</span> Recursos multimedia externos <span style="font-weight:400;color:var(--ink-mute);font-size:0.8rem;">(opcional, normalmente no es necesario)</span></h2>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 0.6rem;">
+      <strong>Cuándo SÍ lo necesitas:</strong> solo si tu Word referencia archivos
+      <em>externos</em> que no están embebidos en él (vídeos MP4, audios MP3, PDFs adicionales)
+      con tags como <code>[VIDEO] Título | video.mp4</code> o <code>[AUDIO] Pie | audio.mp3</code>.
+    </p>
     <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 1rem;">
-      Arrastra imágenes, vídeos, audios o PDFs que se referencien en tu Word con tags como
-      <code>[IMAGEN] Pie | foto.png</code>, <code>[VIDEO] Título | video.mp4</code>.
+      <strong>Cuándo NO lo necesitas:</strong> las <strong>imágenes ya pegadas dentro del Word</strong>
+      se extraen automáticamente, no hace falta volver a subirlas. Tampoco hace falta subir
+      audios si vas a usar la <strong>narración TTS</strong> (botón "🔊 Narración TTS" en el editor).
     </p>
     <div class="upload-zone" id="resZone">
       <div class="icon">📎</div>
-      <div class="text">Haz clic o arrastra varios archivos</div>
+      <div class="text">Haz clic o arrastra archivos externos referenciados en el Word</div>
     </div>
     <input type="file" id="recursos" name="recursos" multiple>
     <ul class="reslist" id="resList"></ul>
@@ -2646,8 +2652,41 @@ def _moodle_test_connection(moodle_url: str, token: str) -> dict:
         "userid": info.get("userid"),
         "has_upload": True,  # /webservice/upload.php siempre está si WS está activo
         "has_wsmanagesections": "local_wsmanagesections_create_module" in fn_names,
+        # v0.6: detectar si podemos mover el archivo a "Archivos privados"
+        # del usuario en vez de dejarlo en el draft area efímero.
+        "has_private_files": "core_user_add_user_private_files" in fn_names,
         "function_count": len(fn_names),
     }
+
+
+def _moodle_promote_draft_to_private(moodle_url: str, token: str,
+                                       draftitemid: int) -> bool:
+    """Mueve los archivos del draft area (itemid) a 'Archivos privados' del
+    usuario, usando el servicio web core_user_add_user_private_files.
+
+    v0.6: sin esto, los archivos subidos sin el plugin local_wsmanagesections
+    quedan en un draft area efímero que no es accesible desde el UI de Moodle.
+    Con esto, el usuario los ve directamente en su pestaña "Archivos privados".
+
+    Devuelve True si se ha movido. Si la función no está disponible o falla,
+    devuelve False (el archivo se queda en draft, igual que antes).
+    """
+    try:
+        _moodle_ws_call(
+            moodle_url, token,
+            "core_user_add_user_private_files",
+            params={"draftid": str(draftitemid)},
+        )
+        return True
+    except Exception as e:
+        try:
+            app.logger.warning(
+                f"No se pudo mover draft {draftitemid} a archivos privados: {e}"
+            )
+        except Exception:
+            # Si app no está disponible aún (test mode), simplemente no loguear
+            pass
+        return False
 
 
 def _moodle_create_scorm_module(moodle_url: str, token: str, courseid: int,
@@ -3089,11 +3128,19 @@ def moodle_upload(token):
                 )
                 # Intentar crear módulo si hay plugin
                 created = None
+                promoted_to_private = False
                 if plugin_available:
                     created = _moodle_create_scorm_module(
                         moodle_url, moodle_token, moodle_courseid,
                         moodle_section, draftitemid,
                         f"{course_title} · {unit['name']}",
+                    )
+                else:
+                    # v0.6: sin plugin, el draft area no es visible para el usuario.
+                    # Movemos el archivo a "Archivos privados" del usuario para que
+                    # pueda encontrarlo en el selector de archivos de Moodle.
+                    promoted_to_private = _moodle_promote_draft_to_private(
+                        moodle_url, moodle_token, draftitemid,
                     )
                 results.append({
                     "unit_index": unit["unit_index"],
@@ -3103,6 +3150,7 @@ def moodle_upload(token):
                     "draftitemid": draftitemid,
                     "module_created": bool(created),
                     "module_info": created,
+                    "in_private_files": promoted_to_private,
                 })
                 ok_count += 1
             except Exception as e:
@@ -4034,7 +4082,37 @@ def course_edit(token):
       let html = '<div class="moodle-summary">';
       html += '<p><strong>Resultado:</strong> ' + ok + ' subido(s) · ' + fail + ' error(es)</p>';
       if (!res.plugin_available) {{
-        html += '<p class="moodle-warn">⚠ El plugin <code>local_wsmanagesections</code> no está instalado en tu Moodle. Los archivos SCORM se han subido a tu <strong>draft area</strong>, pero <strong>debes crear el módulo SCORM en Moodle manualmente</strong>: ve al curso destino, "Activar edición → Añadir actividad o recurso → SCORM", y en la sección "Paquete" arrastra el archivo desde la pestaña "Archivos recientes" o "Mis archivos privados". También puedes pedir a tu admin que instale el plugin <a href="https://moodle.org/plugins/local_wsmanagesections" target="_blank">local_wsmanagesections</a> para automatizar la creación de módulos.</p>';
+        // v0.6: comprobar si el archivo se movió a Archivos privados o se
+        // quedó en el draft area (caso de Moodle muy antiguo)
+        const all_promoted = (res.results || []).every(r => r.ok && r.in_private_files);
+        const some_promoted = (res.results || []).some(r => r.ok && r.in_private_files);
+
+        html += '<div class="moodle-warn" style="line-height:1.5;">';
+        if (all_promoted) {{
+          html += '<p style="margin:0 0 0.5rem 0;"><strong>✓ Archivo subido a "Archivos privados" de tu Moodle.</strong></p>';
+          html += '<p style="margin:0.4rem 0;">Como el plugin <code>local_wsmanagesections</code> no está instalado, no he podido crear el módulo SCORM dentro del curso automáticamente. Tendrás que hacer un último paso a mano:</p>';
+          html += '<p style="margin:0.6rem 0 0.4rem 0;"><strong>📋 Pasos para usarlo en el curso:</strong></p>';
+          html += '<ol style="margin:0 0 0.5rem 1.2rem; padding:0;">';
+          html += '<li>Entra en el curso destino en Moodle y activa la edición.</li>';
+          html += '<li>"Añadir actividad o recurso" → <strong>SCORM</strong>.</li>';
+          html += '<li>En el campo <strong>"Paquete"</strong>, abre el selector de archivos → pestaña <strong>"Archivos privados"</strong> → selecciona el ZIP que acabas de subir.</li>';
+          html += '<li>Guarda. Listo.</li>';
+          html += '</ol>';
+        }} else if (some_promoted) {{
+          html += '<p style="margin:0 0 0.5rem 0;"><strong>⚠ Algunos archivos están en "Archivos privados", otros en el "draft area" temporal.</strong></p>';
+          html += '<p style="margin:0.4rem 0;">Revisa la tabla de abajo: los que ponen "Subido a Archivos privados" los puedes usar yendo al curso destino, "Añadir actividad → SCORM", y eligiéndolos del selector. Los del draft area se perderán cuando Moodle haga limpieza.</p>';
+        }} else {{
+          // Caso problemático: ningún archivo se movió a private files. Probablemente
+          // tu Moodle no permite la función core_user_add_user_private_files
+          // o es muy antiguo (< 3.3) o el rol del usuario no tiene permiso.
+          html += '<p style="margin:0 0 0.5rem 0;"><strong>⚠ El archivo está en el "draft area" temporal de Moodle, NO en "Archivos privados".</strong></p>';
+          html += '<p style="margin:0.4rem 0;">Tu Moodle no permite mover archivos del draft area a Archivos privados desde la API. Esto pasa cuando la función <code>core_user_add_user_private_files</code> no está expuesta en tu token de servicio web, o cuando tu rol no tiene permiso para usarla.</p>';
+          html += '<p style="margin:0.4rem 0;"><strong>Qué hacer:</strong> pídele a tu admin que añada esa función al servicio web del token (en Moodle: Administración → Plugins → Servicios web → Servicios externos → Añadir funciones), o que instale el plugin <a href="https://moodle.org/plugins/local_wsmanagesections" target="_blank">local_wsmanagesections</a> que es la solución completa.</p>';
+        }}
+        if (all_promoted || some_promoted) {{
+          html += '<p style="margin:0.6rem 0 0 0; font-size:0.88rem;"><strong>💡 Para evitar este paso manual</strong>: pídele a tu admin que instale el plugin <a href="https://moodle.org/plugins/local_wsmanagesections" target="_blank">local_wsmanagesections</a>. Con él, el módulo SCORM se crea automáticamente dentro del curso destino.</p>';
+        }}
+        html += '</div>';
       }}
       html += '</div>';
       html += '<table class="moodle-results-table">';
@@ -4044,8 +4122,10 @@ def course_edit(token):
         if (r.ok) {{
           if (r.module_created) {{
             estado = '<span style="color:#059669;">✓ Subido + módulo creado</span>';
+          }} else if (r.in_private_files) {{
+            estado = '<span style="color:#059669;">✓ Subido a Archivos privados</span>';
           }} else {{
-            estado = '<span style="color:#2563eb;">✓ Subido al draftarea (itemid ' + r.draftitemid + ')</span>';
+            estado = '<span style="color:#d97706;">⚠ Subido al draft area (itemid ' + r.draftitemid + ', no visible en el UI)</span>';
           }}
         }} else {{
           estado = '<span style="color:#dc2626;">❌ ' + escapeHtml(r.error || 'error') + '</span>';
@@ -4423,9 +4503,9 @@ def course_edit(token):
             alert('Error: ' + e.message);
           }}
         }});
-      // ----- Botón TTS del curso (v0.5.11: async con polling) -----
+      // ----- Botón TTS del curso (v0.6: un audio por TEMA) -----
       bindAct('tts', async (btn) => {{
-          if (!confirm('Esto generará un archivo de audio por cada subapartado del curso. Puede tardar varios minutos.\\n\\nVerás una barra de progreso. ¿Continuar?')) return;
+          if (!confirm('Esto generará un archivo de audio por cada tema del curso (uno por cada Word subido).\\n\\nPuede tardar varios minutos. Verás una barra de progreso. ¿Continuar?')) return;
           collectChanges();
           try {{
             const r = await fetch('/api/curso/' + TOKEN + '/tts', {{
@@ -4438,7 +4518,7 @@ def course_edit(token):
             const finalResult = await runJobWithProgress(
               launch.job_id, launch.total,
               '🔊 Generando narraciones TTS',
-              'Procesando ' + launch.total + ' subapartado(s)...'
+              'Procesando ' + launch.total + ' tema(s)...'
             );
             if (!finalResult) return;
             const s = finalResult.result || {{}};
@@ -4783,20 +4863,37 @@ def course_edit(token):
           return mm + ':' + ss;
         }};
         return new Promise((resolve) => {{
+          let consecutiveErrors = 0;
+          let lastGoodStep = '';
           const poll = async () => {{
             try {{
               const r = await fetch('/api/jobs/' + jobId);
               if (!r.ok) {{
-                step.textContent = '⚠ No se puede consultar el job (sesión caducada?)';
+                consecutiveErrors++;
+                // Solo mostrar aviso tras 3 fallos seguidos (~8s) y diferenciar
+                // 404 (job expirado) de 401 (sesión caducada) de resto.
+                if (consecutiveErrors >= 3) {{
+                  if (r.status === 401 || r.status === 403) {{
+                    step.textContent = '⚠ Tu sesión ha expirado. Recarga la página e inicia sesión.';
+                  }} else if (r.status === 404) {{
+                    step.textContent = '⏳ El proceso aún se está iniciando en el servidor...';
+                  }} else {{
+                    step.textContent = '⏳ Reintentando consulta del servidor (' + consecutiveErrors + ')...';
+                  }}
+                }}
                 setTimeout(poll, 2500);
                 return;
               }}
+              consecutiveErrors = 0;
               const j = await r.json();
               const pct = j.total ? Math.round((j.progress / j.total) * 100) : 0;
               bar.style.width = pct + '%';
               count.textContent = j.progress + ' / ' + j.total;
               elapsed.textContent = fmtElapsed(Date.now() - startTs);
-              if (j.current_step) step.textContent = j.current_step;
+              if (j.current_step) {{
+                step.textContent = j.current_step;
+                lastGoodStep = j.current_step;
+              }}
               if (j.log && j.log.length) {{
                 logEl.innerHTML = j.log.slice(-6).map(l =>
                   '<div class="ed-log-line">' + escapeHtml(l) + '</div>'
@@ -4821,7 +4918,10 @@ def course_edit(token):
                 setTimeout(poll, 1500);
               }}
             }} catch (e) {{
-              step.textContent = '⚠ Error de red, reintentando...';
+              consecutiveErrors++;
+              if (consecutiveErrors >= 3) {{
+                step.textContent = '⏳ Sin conexión con el servidor, reintentando...';
+              }}
               setTimeout(poll, 3000);
             }}
           }};
@@ -7478,7 +7578,17 @@ def _image_tint_css_local(theme) -> str:
 
 
 def _resolve_course_resource(job_dir: Path, filename: str) -> Optional[Path]:
-    """Resuelve recursos tanto en cursos single como batch."""
+    """Resuelve recursos tanto en cursos single como batch.
+
+    v0.6: búsqueda más exhaustiva. Busca en (en orden):
+      1. Para path __topic_N__/inner: en salida/unidad_NN_*/recursos/inner
+      2. job_dir/recursos/filename
+      3. job_dir/salida/recursos/filename
+      4. job_dir/salida/curso/recursos/filename  (modo single)
+      5. job_dir/salida/**/recursos/filename     (cualquier unidad)
+      6. job_dir/_extracted_images/filename       (fallback: imágenes recién extraídas)
+      7. job_dir/recursos/__topic_N__/filename    (modo batch antiguo)
+    """
     requested = Path(filename)
     if requested.is_absolute() or any(part == ".." for part in requested.parts):
         return None
@@ -7489,20 +7599,43 @@ def _resolve_course_resource(job_dir: Path, filename: str) -> Optional[Path]:
         inner = Path(topic_match.group(2))
         if inner.is_absolute() or any(part == ".." for part in inner.parts):
             return None
+        # 1) Carpetas de unidad específica
         for unit_dir in sorted((job_dir / "salida").glob(f"unidad_{topic_number:02d}_*")):
             candidate = unit_dir / "recursos" / inner
             if candidate.is_file():
                 return candidate
+        # 1b) Carpeta de single (cuando un curso "batch" tiene 1 sólo tema)
+        candidate = job_dir / "salida" / "curso" / "recursos" / inner
+        if candidate.is_file():
+            return candidate
+        # 1c) Buscar en CUALQUIER unidad (la imagen puede haber sido extraída
+        # en otra unidad si los nombres son comunes entre temas)
+        inner_name = inner.name
+        for candidate in sorted((job_dir / "salida").glob(f"**/recursos/{inner_name}")):
+            if candidate.is_file():
+                return candidate
+        # 1d) Fallback: imágenes recién extraídas (antes del empaquetado)
+        candidate = job_dir / "_extracted_images" / inner_name
+        if candidate.is_file():
+            return candidate
+        # 1e) Fallback final: en recursos raíz
+        candidate = job_dir / "recursos" / inner_name
+        if candidate.is_file():
+            return candidate
         return None
 
+    # Modo single (sin prefijo __topic_N__/)
     candidates = [
         job_dir / "recursos" / requested,
         job_dir / "salida" / "recursos" / requested,
+        job_dir / "salida" / "curso" / "recursos" / requested,
+        job_dir / "_extracted_images" / requested,
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
 
+    # Buscar en cualquier subcarpeta de recursos
     for candidate in sorted((job_dir / "salida").glob(f"**/recursos/{filename}")):
         if candidate.is_file():
             return candidate
@@ -8903,12 +9036,11 @@ def course_ai_illustration(token):
 @app.route("/api/curso/<token>/tts", methods=["POST"])
 @login_required
 def course_tts(token):
-    """Genera narraciones TTS para todos los subapartados del curso.
+    """Genera narraciones TTS para el curso.
 
-    v0.5.11: convertido a ASÍNCRONO con jobs en memoria. Devuelve {job_id}
-    inmediatamente; el frontend hace polling a /api/jobs/<id>. Esto evita
-    timeouts de nginx/gunicorn cuando hay muchos subapartados (10 unidades ×
-    5 subapartados = 50 audios pueden tardar 5+ minutos).
+    v0.6: ahora se genera UN AUDIO POR TEMA (no por subapartado). El archivo
+    se referencia desde el tema y se puede descargar desde la cabecera del
+    SCORM con el botón "Descargar audio del tema".
     """
     user = current_user()
     row, structure_path, course_data = _load_course_for_user(token, user)
@@ -8918,23 +9050,20 @@ def course_tts(token):
         return jsonify({"error": "Curso sin estructura editable"}), 404
 
     try:
-        from scorm_builder.tts import synthesize, subsection_to_text, tts_available, tts_engine_info
+        from scorm_builder.tts import synthesize, topic_to_text, tts_available, tts_engine_info
     except ImportError as e:
         return jsonify({"error": f"Módulo TTS no disponible: {e}"}), 500
     if not tts_available():
         engine_name, info_msg = tts_engine_info()
         return jsonify({"error": f"No hay motor TTS instalado. {info_msg}"}), 400
 
-    # Contar subapartados totales para reportar progreso
-    total_subs = sum(
-        len(topic.get("subsections", []))
-        for topic in course_data.get("topics", [])
-    )
-    if total_subs == 0:
-        return jsonify({"error": "El curso no tiene subapartados"}), 400
+    # v0.6: progreso por TEMA, no por subapartado
+    total_topics = len(course_data.get("topics", []))
+    if total_topics == 0:
+        return jsonify({"error": "El curso no tiene temas"}), 400
 
     snap_id = _save_snapshot(Path(row["zip_path"]).parent, label="pre_tts")
-    jid = _new_job("tts_all", token, total_subs)
+    jid = _new_job("tts_all", token, total_topics)
     _update_job(jid, snapshot_id=snap_id)
 
     job_dir = Path(row["zip_path"]).parent
@@ -8942,9 +9071,7 @@ def course_tts(token):
 
     def _tts_worker():
         try:
-            from scorm_builder.tts import synthesize, subsection_to_text
-            # En modo batch, los audios van a las carpetas locales de cada unidad
-            # para que se incluyan en su SCORM. En single, a salida/curso/recursos/
+            from scorm_builder.tts import synthesize, topic_to_text
             output_dir = job_dir / "salida"
             unit_dirs = sorted(output_dir.glob("unidad_*"))
             is_batch = bool(unit_dirs)
@@ -8956,9 +9083,10 @@ def course_tts(token):
             generated = 0
             skipped = 0
             errors = []
-            step = 0
 
             for ti, topic in enumerate(data.get("topics", [])):
+                _update_job(jid, current_step=ti + 1,
+                            current_label=f"Tema {ti+1}/{total_topics}")
                 # Determinar carpeta de recursos correcta
                 if is_batch:
                     idx_str = f"{ti+1:02d}"
@@ -8970,60 +9098,50 @@ def course_tts(token):
                     target_recursos = job_dir / "salida" / "recursos"
                 target_recursos.mkdir(parents=True, exist_ok=True)
 
-                for si, sub in enumerate(topic.get("subsections", [])):
-                    step += 1
-                    _update_job(jid, current_step=step,
-                                current_label=f"Tema {ti+1}, sub {si+1}")
-                    class _BT:
-                        def __init__(self, v): self.value = v
-                    class _Holder: pass
-                    sub_obj = _Holder()
-                    sub_obj.title = sub.get("title", "")
-                    sub_obj.blocks = []
-                    for b in sub.get("blocks", []):
-                        blk = _Holder()
-                        blk.type = _BT(b.get("type", "paragraph"))
-                        blk.text = b.get("text", "")
-                        blk.items = b.get("items", [])
-                        sub_obj.blocks.append(blk)
-                    text = subsection_to_text(sub_obj)
-                    if not text.strip():
-                        skipped += 1
-                        continue
-                    # v0.5.17: gTTS produce .mp3, pyttsx3 produce .wav.
-                    # synthesize() ajusta la extensión y devuelve la ruta real.
-                    target_base = target_recursos / f"audio_T{ti+1:02d}_{si+1:02d}.mp3"
-                    try:
-                        result = synthesize(text, target_base, language="es")
-                        if result:
-                            generated += 1
-                            # Usar el nombre real (con la extensión que devolvió)
-                            filename = Path(result).name
+                text = topic_to_text(topic)
+                if not text.strip():
+                    skipped += 1
+                    continue
+
+                target_base = target_recursos / f"audio_T{ti+1:02d}.mp3"
+                try:
+                    result = synthesize(text, target_base, language="es")
+                    if result:
+                        generated += 1
+                        filename = Path(result).name
+                        # Guardar el nombre del audio en el tema para que el
+                        # render lo enganche en la cabecera del SCORM.
+                        topic["audio_filename"] = filename
+                        # Mantener también un bloque audio en el primer subapartado
+                        # para compatibilidad con el modo antiguo (reproductor
+                        # inline). Si ya hay uno apuntando al mismo archivo, no
+                        # se duplica.
+                        if topic.get("subsections"):
+                            first_sub = topic["subsections"][0]
                             has_audio = any(
                                 b.get("type") == "audio" and (b.get("extras", {}).get("src") == filename)
-                                for b in sub.get("blocks", [])
+                                for b in first_sub.get("blocks", [])
                             )
                             if not has_audio:
-                                sub.setdefault("blocks", []).insert(0, {
+                                first_sub.setdefault("blocks", []).insert(0, {
                                     "type": "audio",
-                                    "text": "Narración del subapartado",
+                                    "text": "Narración del tema completo",
                                     "items": [], "rows": [],
                                     "extras": {"src": filename, "file": filename},
                                 })
-                        else:
-                            errors.append(f"T{ti+1}.{si+1}: TTS devolvió None")
-                    except Exception as e:
-                        errors.append(f"T{ti+1}.{si+1}: {e}")
-                        if len(errors) >= 10:
-                            # Demasiados errores, abortar antes de saturar
-                            errors.append("(abortado por demasiados errores)")
-                            break
+                    else:
+                        errors.append(f"T{ti+1}: TTS devolvió None")
+                except Exception as e:
+                    errors.append(f"T{ti+1}: {e}")
+                    if len(errors) >= 10:
+                        errors.append("(abortado por demasiados errores)")
+                        break
 
             # Persistir
             with open(structure_path_str, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            _update_job(jid, state="done", current_step=total_subs,
+            _update_job(jid, state="done", current_step=total_topics,
                         result={
                             "generated": generated,
                             "skipped": skipped,
@@ -9033,7 +9151,7 @@ def course_tts(token):
             _update_job(jid, state="error", error_message=str(e))
 
     threading.Thread(target=_tts_worker, daemon=True).start()
-    return jsonify({"job_id": jid, "total": total_subs})
+    return jsonify({"job_id": jid, "total": total_topics})
 
 
 @app.route("/api/curso/<token>/export-html", methods=["POST"])
@@ -9709,9 +9827,38 @@ def api_generar():
                     make_custom_theme(**custom_palette)
                     if custom_palette else get_theme(paleta)
                 )
-                htmls = render_html(r.course, theme_obj)
+                # v0.6: pasar pdf_filenames y audio_filenames para que el SCORM
+                # 2004 incluya los botones de descarga en la cabecera, igual
+                # que el SCORM 1.2.
+                pdf_filenames_2004 = {}
+                audio_filenames_2004 = {}
+                for t in r.course.topics:
+                    pdf_filenames_2004[t.number] = f"apuntes_T{t.number:02d}.pdf"
+                    # Si hay audio generado por TTS, está marcado en topic.audio_filename
+                    audio_fn = getattr(t, "audio_filename", None)
+                    if audio_fn:
+                        audio_filenames_2004[t.number] = audio_fn
+                htmls = render_html(
+                    r.course, theme_obj,
+                    pdf_filenames=pdf_filenames_2004,
+                    audio_filenames=audio_filenames_2004,
+                )
                 scorm2004_dir = this_out / "scorm_2004"
                 scorm2004_dir.mkdir(exist_ok=True)
+                # Recursos: incluir tanto la carpeta recursos como los PDFs
+                recursos_2004 = (this_out / "recursos") if (this_out / "recursos").exists() else None
+                # Si hay PDFs en this_out/pdfs, los añadimos a recursos para que
+                # el botón de descarga del SCORM 2004 funcione
+                pdfs_src = this_out / "pdfs"
+                if pdfs_src.exists():
+                    if not recursos_2004:
+                        recursos_2004 = this_out / "_recursos_2004_tmp"
+                        recursos_2004.mkdir(exist_ok=True)
+                    for pdf in pdfs_src.glob("*.pdf"):
+                        try:
+                            shutil.copy2(pdf, recursos_2004 / pdf.name)
+                        except Exception:
+                            pass
                 for t in r.course.topics:
                     if t.number not in htmls:
                         continue
@@ -9722,7 +9869,7 @@ def api_generar():
                         html_content=htmls[t.number],
                         course_title=r.course.metadata.title,
                         output_path=zip_path,
-                        recursos_dir=(this_out / "recursos") if (this_out / "recursos").exists() else None,
+                        recursos_dir=recursos_2004,
                         mastery=mastery,
                     )
                     total_packages += 1

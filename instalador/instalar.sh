@@ -37,6 +37,52 @@ echo ""
 # ===================================================================
 # 1. Comprobar Python
 # ===================================================================
+echo -e "${AMARILLO}→${SIN_COLOR} Comprobando dependencias del sistema..."
+
+# Tesseract español (OCR de tablas en imágenes) y fuentes Unicode (PDF
+# con acentos). Si apt está disponible y faltan, los instalamos.
+# Si no es Debian/Ubuntu, avisamos pero no bloqueamos.
+if command -v apt-get &> /dev/null; then
+    NEED_APT=""
+    if ! command -v tesseract &> /dev/null; then
+        NEED_APT="$NEED_APT tesseract-ocr"
+    fi
+    # Comprobar paquete de idioma español de tesseract
+    if command -v tesseract &> /dev/null; then
+        if ! tesseract --list-langs 2>&1 | grep -q "^spa$"; then
+            NEED_APT="$NEED_APT tesseract-ocr-spa"
+        fi
+    else
+        NEED_APT="$NEED_APT tesseract-ocr-spa"
+    fi
+    # Fuentes Unicode para que los PDFs renderen acentos
+    if [ ! -f "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" ] \
+       && [ ! -f "/usr/share/fonts/dejavu/DejaVuSans.ttf" ]; then
+        NEED_APT="$NEED_APT fonts-dejavu-core"
+    fi
+    if [ -n "$NEED_APT" ]; then
+        echo -e "  ${AMARILLO}!${SIN_COLOR} Faltan paquetes:$NEED_APT"
+        echo -e "  Intentando instalarlos (necesita contraseña sudo)..."
+        if sudo apt-get install -y $NEED_APT 2>/dev/null; then
+            echo -e "  ${VERDE}✓${SIN_COLOR} Paquetes del sistema instalados"
+        else
+            echo -e "  ${AMARILLO}!${SIN_COLOR} No se han podido instalar automáticamente."
+            echo -e "    Instala a mano cuando puedas:"
+            echo -e "    ${NEGRITA}sudo apt install$NEED_APT${SIN_COLOR}"
+            echo -e "    (El OCR de tablas en imágenes y los acentos del PDF"
+            echo -e "    pueden no funcionar bien sin ellos.)"
+        fi
+    else
+        echo -e "  ${VERDE}✓${SIN_COLOR} tesseract+spa y fuentes Unicode ya instalados"
+    fi
+else
+    echo -e "  ${AMARILLO}!${SIN_COLOR} apt-get no disponible — saltando dependencias del sistema."
+    echo -e "    Para que el OCR de tablas en imágenes funcione en español,"
+    echo -e "    instala manualmente: ${NEGRITA}tesseract${SIN_COLOR} y el paquete de idioma español"
+    echo -e "    (en macOS: ${NEGRITA}brew install tesseract tesseract-lang${SIN_COLOR})."
+fi
+echo ""
+
 echo -e "${AMARILLO}→${SIN_COLOR} Comprobando Python..."
 
 if command -v python3 &> /dev/null; then
@@ -117,7 +163,10 @@ echo ""
 # ===================================================================
 echo -e "${AMARILLO}→${SIN_COLOR} Instalando el motor scorm-builder (esto tarda 1-2 minutos)..."
 cd "$PROYECTO_DIR/libreria"
-pip install --quiet -e .
+# v0.6: incluir extras OCR (cv2 + pytesseract) y TTS (gtts)
+# Si fallan, el motor base sigue funcionando — las features simplemente
+# se desactivan en runtime con detección de import.
+pip install --quiet -e ".[ocr,tts]" || pip install --quiet -e .
 echo -e "  ${VERDE}✓${SIN_COLOR} Motor instalado"
 echo ""
 

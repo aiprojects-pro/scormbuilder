@@ -28,6 +28,8 @@ dependencies = [
     "click>=8.1.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
+    # v0.6: procesado de imágenes (upscaling) + soporte PDF imágenes
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +41,17 @@ dev = [
 ]
 ai = [
     "anthropic>=0.25.0",
+]
+# v0.6: OCR de tablas en imágenes (detección + extracción a tabla editable).
+# Requiere también el binario `tesseract` + paquete `tesseract-ocr-spa`
+# instalados en el sistema (Linux: apt; macOS: brew install tesseract tesseract-lang).
+ocr = [
+    "opencv-python-headless>=4.8.0",
+    "pytesseract>=0.3.10",
+    "numpy>=1.24.0",
+]
+tts = [
+    "gtts>=2.5.0",
 ]
 
 [project.scripts]

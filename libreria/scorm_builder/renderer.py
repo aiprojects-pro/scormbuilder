@@ -312,23 +312,59 @@ a:hover { color: var(--primary-deep); }
   border-collapse: collapse;
   margin: 1.5rem 0;
   font-size: 0.95rem;
+  background: white;
+  border: 1px solid var(--paper-deep);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
-.edit-table thead { background: var(--primary-deep); color: white; }
-.edit-table th {
+/* v0.6: cabecera con fondo CLARO del theme y texto oscuro (accesible) */
+.edit-table thead {
+  background: var(--primary-pale);
+  color: var(--primary-deep);
+  border-bottom: 2px solid var(--primary);
+}
+.edit-table thead th {
   text-align: left;
   padding: 0.9rem 1rem;
   font-family: var(--sans);
-  font-weight: 600;
-  font-size: 0.82rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 0.88rem;
+  letter-spacing: 0.03em;
+  color: var(--primary-deep);
+  background: var(--primary-pale);
+}
+.edit-table tbody th {
+  /* primera columna como cabecera de fila: fondo claro, texto oscuro */
+  text-align: left;
+  padding: 0.9rem 1rem;
+  font-family: var(--sans);
+  font-weight: 700;
+  color: var(--primary-deep);
+  background: var(--primary-mist);
+  border-right: 1px solid var(--paper-deep);
+  vertical-align: top;
 }
 .edit-table td {
   padding: 0.9rem 1rem;
   border-bottom: 1px solid var(--paper-deep);
   vertical-align: top;
+  color: var(--ink);
+  background: white;
 }
-.edit-table tr:nth-child(even) td { background: var(--paper-warm); }
+.edit-table tbody tr:nth-child(even) td { background: var(--paper-warm); }
+.edit-table tbody tr:nth-child(even) th { background: var(--primary-pale); }
+.edit-table tbody tr:last-child td,
+.edit-table tbody tr:last-child th { border-bottom: none; }
+.edit-table caption {
+  caption-side: top;
+  text-align: left;
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--primary-deep);
+  padding: 0.5rem 0;
+  font-size: 0.95rem;
+}
 
 .downloads {
   background: white;
@@ -700,12 +736,18 @@ button:focus-visible,
 /* main programáticamente enfocable sin contorno raro al hacer clic */
 main:focus { outline: none; }
 
-/* Botón de descarga del PDF en la cabecera */
-.pdf-download-btn {
+/* Botones de descarga en la cabecera (PDF + audio) */
+.download-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+}
+.pdf-download-btn,
+.audio-download-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  margin-top: 1.5rem;
   padding: 0.7rem 1.2rem;
   background: rgba(255,255,255,0.12);
   border: 2px solid rgba(255,255,255,0.5);
@@ -716,16 +758,20 @@ main:focus { outline: none; }
   font-size: 0.95rem;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
-.pdf-download-btn:hover {
+.pdf-download-btn:hover,
+.audio-download-btn:hover {
   background: rgba(255,255,255,0.22);
   border-color: white;
 }
-.pdf-download-btn:active { transform: translateY(1px); }
-.pdf-download-btn:focus-visible {
+.pdf-download-btn:active,
+.audio-download-btn:active { transform: translateY(1px); }
+.pdf-download-btn:focus-visible,
+.audio-download-btn:focus-visible {
   outline: 3px solid white;
   outline-offset: 3px;
 }
-.pdf-download-btn .pdf-icon { font-size: 1.2rem; }
+.pdf-download-btn .pdf-icon,
+.audio-download-btn .audio-icon { font-size: 1.2rem; }
 
 /* Enlaces dentro del cuerpo (los preservados desde el Word) */
 .module-main a,
@@ -1676,12 +1722,35 @@ def _render_block(block: Block) -> str:
             cell_render = _h
         header = rows_data[0]
         body = rows_data[1:]
-        thead = "<thead><tr>" + "".join(f"<th scope=\"col\">{cell_render(c)}</th>" for c in header) + "</tr></thead>"
-        tbody = "<tbody>" + "".join(
-            "<tr>" + "".join(f"<td>{cell_render(c)}</td>" for c in row) + "</tr>"
+        # v0.6: detectar si la primera columna actúa como "header lateral".
+        # Heurística: si TODAS las celdas de la primera columna del body son
+        # cortas (≤ 80 chars de texto plano) y ninguna está vacía, las
+        # marcamos como <th scope="row"> para que reciban el estilo de
+        # cabecera con fondo claro y texto oscuro accesible.
+        def _plain_len(c):
+            s = c if isinstance(c, str) else str(c)
+            import re as _re
+            return len(_re.sub(r"<[^>]+>", "", s).strip())
+        first_col_is_header = bool(body) and all(
+            row and _plain_len(row[0]) > 0 and _plain_len(row[0]) <= 80
             for row in body
-        ) + "</tbody>"
-        return f'<table class="edit-table">{thead}{tbody}</table>'
+        )
+        # Caption opcional si hay extras["caption"]
+        caption_html = ""
+        cap = (block.extras or {}).get("caption", "").strip() if block.extras else ""
+        if cap:
+            caption_html = f"<caption>{_h(cap)}</caption>"
+        thead = "<thead><tr>" + "".join(f"<th scope=\"col\">{cell_render(c)}</th>" for c in header) + "</tr></thead>"
+        def _row_html(row):
+            cells = []
+            for ci, c in enumerate(row):
+                if ci == 0 and first_col_is_header:
+                    cells.append(f'<th scope="row">{cell_render(c)}</th>')
+                else:
+                    cells.append(f'<td>{cell_render(c)}</td>')
+            return "<tr>" + "".join(cells) + "</tr>"
+        tbody = "<tbody>" + "".join(_row_html(row) for row in body) + "</tbody>"
+        return f'<table class="edit-table">{caption_html}{thead}{tbody}</table>'
 
     if bt == BlockType.CALLOUT_KEY:
         return f'''<aside class="callout callout-key" role="note" aria-label="Concepto clave">
@@ -1960,6 +2029,7 @@ def render_topic(
     course: CourseStructure,
     theme: Theme,
     pdf_filename: Optional[str] = None,
+    audio_filename: Optional[str] = None,
 ) -> str:
     """Renderiza un tema completo como HTML standalone.
 
@@ -1969,6 +2039,8 @@ def render_topic(
         theme: paleta visual
         pdf_filename: si se pasa, se añade un botón "Descargar PDF" en la
             cabecera que apunta a `recursos/<pdf_filename>`. v0.5.
+        audio_filename: si se pasa, se añade un botón "Descargar audio" en la
+            cabecera apuntando a `recursos/<audio_filename>`. v0.6.
     """
     # Sidebar items: subapartados + evaluación si hay quiz
     sidebar_items = []
@@ -2004,15 +2076,23 @@ def render_topic(
     # Lista de ids de los subapartados, para que el JS sepa cuáles trackear
     subsection_ids_json = "[" + ",".join(f'"{s.id}"' for s in topic.subsections) + "]"
 
-    # v0.5: botón de descarga del PDF en la cabecera (si está disponible)
-    pdf_btn_html = ""
+    # v0.5: botones de descarga en la cabecera (PDF + audio si están disponibles)
+    download_buttons = []
     if pdf_filename:
-        pdf_btn_html = f'''
-    <a class="pdf-download-btn" href="recursos/{_h(pdf_filename)}" download
+        download_buttons.append(f'''<a class="pdf-download-btn" href="recursos/{_h(pdf_filename)}" download
        aria-label="Descargar apuntes del tema en PDF">
       <span class="pdf-icon" aria-hidden="true">📄</span>
       <span class="pdf-label">Descargar apuntes (PDF)</span>
-    </a>'''
+    </a>''')
+    if audio_filename:
+        download_buttons.append(f'''<a class="audio-download-btn" href="recursos/{_h(audio_filename)}" download
+       aria-label="Descargar narración del tema en audio">
+      <span class="audio-icon" aria-hidden="true">🔊</span>
+      <span class="audio-label">Descargar audio del tema</span>
+    </a>''')
+    pdf_btn_html = ""
+    if download_buttons:
+        pdf_btn_html = '<div class="download-bar">\n    ' + "\n    ".join(download_buttons) + '\n    </div>'
 
     # v0.5 Fase 2: chips de tags bajo el título
     tags_html = ""
@@ -2102,6 +2182,7 @@ def render_html(
     course: CourseStructure,
     theme: Theme,
     pdf_filenames: Optional[Dict[int, str]] = None,
+    audio_filenames: Optional[Dict[int, str]] = None,
 ) -> Dict[int, str]:
     """Renderiza todos los temas del curso. Devuelve {numero_tema: html}.
 
@@ -2110,9 +2191,16 @@ def render_html(
         theme: paleta visual
         pdf_filenames: opcional, {numero_tema: nombre_pdf} para añadir el
             botón "Descargar PDF" en cada tema (v0.5).
+        audio_filenames: opcional, {numero_tema: nombre_audio} para añadir el
+            botón "Descargar audio del tema" en la cabecera (v0.6).
     """
     pdfs = pdf_filenames or {}
+    audios = audio_filenames or {}
     return {
-        topic.number: render_topic(topic, course, theme, pdf_filename=pdfs.get(topic.number))
+        topic.number: render_topic(
+            topic, course, theme,
+            pdf_filename=pdfs.get(topic.number),
+            audio_filename=audios.get(topic.number),
+        )
         for topic in course.topics
     }
