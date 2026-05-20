@@ -506,10 +506,25 @@ def extract_table_from_image(
         return result
 
     try:
-        img = cv2.imread(str(image_path))
-        if img is None:
+        # v0.6.6: cargar con IMREAD_UNCHANGED para preservar canal alpha si lo
+        # hay. Las imágenes PNG pueden venir con transparencia, y cv2.imread
+        # por defecto las convierte a negro, lo que rompe completamente la
+        # detección (caso DigComp tema 3 — 72% píxeles "negros" por alpha=0).
+        img_raw = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+        if img_raw is None:
             result.notes.append(f"No se pudo leer la imagen: {image_path}")
             return result
+        # Si tiene canal alpha, componer sobre fondo blanco
+        if len(img_raw.shape) == 3 and img_raw.shape[2] == 4:
+            bgr = img_raw[:, :, :3].astype(np.float32)
+            alpha = img_raw[:, :, 3].astype(np.float32) / 255.0
+            white = np.full_like(bgr, 255.0)
+            img = (bgr * alpha[:, :, None] + white * (1 - alpha[:, :, None])).astype(np.uint8)
+        elif len(img_raw.shape) == 2:
+            # Escala de grises sin alpha
+            img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2BGR)
+        else:
+            img = img_raw
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         H, W = gray.shape
         if H < 80 or W < 80:
@@ -518,14 +533,23 @@ def extract_table_from_image(
 
         # FASE PREVIA — clasificación rápida: ¿es plausible que esto sea
         # una tabla? Si NO lo es, salimos rápido sin gastar tiempo en OCR.
-        # Características que descartan: el "centro de masa" de la imagen
-        # está muy fragmentado (diagrama de iconos), o no hay texto plano.
-        if not _looks_like_a_table(gray, cv2, np, info_dict=result.notes):
-            result.notes.append("Clasificación previa: no parece una tabla.")
-            return result
+        # v0.6.6: detectamos PRIMERO el grid (líneas h y v). Si encontramos
+        # estructura de grid clara (al menos 3 h-lines y 1 v-line interna),
+        # OMITIMOS la clasificación previa de saturación — un grid claro es
+        # evidencia más fuerte que la heurística de saturación, y evita
+        # falsos negativos en tablas con cabeceras coloreadas grandes (caso
+        # tema 3 "DigComp" con cabeceras azules laterales).
+        h_lines_preview, v_lines_preview, _info_preview = _detect_grid_lines(gray, cv2, np)
+        grid_clear = (len(h_lines_preview) >= 3 and len(v_lines_preview) >= 1)
+        if not grid_clear:
+            # Sin grid claro: aplicar clasificación previa habitual
+            if not _looks_like_a_table(gray, cv2, np, info_dict=result.notes):
+                result.notes.append("Clasificación previa: no parece una tabla.")
+                return result
 
-        # 1) Detectar líneas (grid)
-        h_lines, v_lines, info = _detect_grid_lines(gray, cv2, np)
+        # 1) Detectar líneas (grid) — reusamos lo detectado arriba para no
+        # repetir el trabajo.
+        h_lines, v_lines, info = h_lines_preview, v_lines_preview, _info_preview
         result.notes.append(
             f"Grid: {info['h_lines_count']} h-lines, "
             f"{info.get('v_lines_count_internal', 0)} v-lines internas "
@@ -553,7 +577,15 @@ def extract_table_from_image(
         if len(h_lines) >= 3 and len(v_lines) >= 1:
             H, W = gray.shape
             v_lines_full = sorted(set([0] + list(v_lines) + [W]))
-            r = _extract_with_grid(gray, h_lines, v_lines_full, pytesseract, lang, result)
+            # v0.6.5: añadir bordes superior/inferior a h_lines si hay espacio
+            # suficiente. Esto captura la primera/última fila cuando las
+            # h_lines detectadas son solo separadores internos (caso POSDCORB).
+            h_lines_full = sorted(set(h_lines))
+            if h_lines_full and h_lines_full[0] > 30:
+                h_lines_full = [0] + h_lines_full
+            if h_lines_full and (H - h_lines_full[-1]) > 30:
+                h_lines_full = h_lines_full + [H]
+            r = _extract_with_grid(gray, h_lines_full, v_lines_full, pytesseract, lang, result)
             if r.is_table and r.n_cols >= 2:
                 return r
             # Si no detecta 2+ columnas reales, caer a row_strips
@@ -564,6 +596,44 @@ def extract_table_from_image(
         row_strips = _valid_separators(row_strips, min_gap=20)
         result.notes.append(f"row_strips tras filtro: {len(row_strips)}")
         if len(row_strips) >= 2:
+            # v0.6.5/v0.6.6: validaciones para descartar diagramas que se
+            # detectan falsamente como tablas 1-columna.
+            strips_sorted = sorted(set(row_strips))
+            heights = [strips_sorted[i+1] - strips_sorted[i]
+                       for i in range(len(strips_sorted)-1)]
+            n_rows = len(heights)
+            mean_height = sum(heights) / n_rows if n_rows > 0 else 0
+
+            # (a) Pocas filas con altura grande → diagrama
+            if n_rows < 3 and mean_height > 100:
+                result.notes.append(
+                    f"Descartado row_strips: solo {n_rows} filas con "
+                    f"altura media {mean_height:.0f}px (probable diagrama)"
+                )
+                return result
+
+            # (b) Distinguir diagrama de lista válida:
+            # - Listas reales suelen tener cabeceras CORTAS (filas pequeñas)
+            #   seguidas de contenido más grande.
+            # - Diagramas tienen cajas de tamaño medio-grande, sin filas
+            #   muy pequeñas que actúen como cabeceras.
+            # Si hay >=4 filas Y NINGUNA es pequeña (<35% del promedio) Y
+            # las alturas tienen alta variabilidad (max/mediana > 2.5),
+            # probablemente es un diagrama, no una lista.
+            if n_rows >= 4 and mean_height > 0:
+                small_threshold = 0.35 * mean_height
+                small_rows = sum(1 for h_ in heights if h_ < small_threshold)
+                sorted_h = sorted(heights)
+                median_h = sorted_h[len(sorted_h) // 2]
+                max_h = max(heights)
+                ratio = max_h / median_h if median_h > 0 else 1
+                if small_rows == 0 and ratio > 2.5:
+                    result.notes.append(
+                        f"Descartado row_strips: {n_rows} filas sin cabeceras "
+                        f"cortas y altura variable (max/mediana={ratio:.1f}, "
+                        f"probable diagrama)"
+                    )
+                    return result
             return _extract_row_strips(gray, row_strips, pytesseract, lang, result)
 
         # Caso C: la imagen no parece una tabla

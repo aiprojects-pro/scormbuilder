@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCORM Builder — Wizard 5 pasos (mockup)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.5.0/tabler-icons.min.css">
+<style>
+:root {
+  --bg: #FAFAF7;
+  --surface: #FFFFFF;
+  --surface-2: #F5F4EF;
+  --text: #1A1A19;
+  --text-2: #5F5E5A;
+  --text-3: #8E8D87;
+  --border: rgba(0,0,0,0.10);
+  --border-strong: rgba(0,0,0,0.18);
+  --info-bg: #E6F1FB;
+  --info-text: #0C447C;
+  --info-border: #378ADD;
+  --success: #0F6E56;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body { font-family: var(--sans); background: var(--bg); color: var(--text); margin: 0; padding: 0; line-height: 1.5; }
+.frame { max-width: 760px; margin: 0 auto; padding: 3rem 2rem; }
+.intro { font-size: 13px; color: var(--text-3); margin-bottom: 1rem; text-align: center; }
+.sw { background: var(--surface); border-radius: var(--radius-lg); border: 0.5px solid var(--border); padding: 2rem 2.25rem; }
+
+.stepper { display: flex; justify-content: space-between; align-items: flex-start; margin: 0 0 2.25rem; position: relative; }
+.stepper::before { content: ""; position: absolute; top: 16px; left: 8%; right: 8%; height: 1px; background: var(--border); z-index: 0; }
+.step { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; position: relative; z-index: 1; padding: 0 4px; }
+.step-circle { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; background: var(--surface); border: 0.5px solid var(--border); color: var(--text-3); transition: all 0.15s; }
+.step-label { font-size: 12px; color: var(--text-3); text-align: center; line-height: 1.3; }
+.step.current .step-circle { background: var(--text); color: var(--surface); border-color: var(--text); box-shadow: 0 0 0 4px var(--surface-2); }
+.step.current .step-label { color: var(--text); font-weight: 500; }
+.step.completed .step-circle { background: var(--info-bg); color: var(--info-text); border-color: var(--info-bg); }
+.step.completed .step-label { color: var(--text-2); }
+
+.step-content { display: none; min-height: 360px; }
+.step-content.active { display: block; }
+.lede { font-size: 24px; font-weight: 500; margin: 0 0 8px; line-height: 1.25; }
+.sub { font-size: 14px; color: var(--text-2); margin: 0 0 1.5rem; line-height: 1.55; }
+
+.dropzone { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 2.5rem 1.5rem; text-align: center; background: var(--surface-2); }
+.dropzone .ti { font-size: 36px; color: var(--text-3); margin-bottom: 12px; display: block; }
+.dropzone-active { border-style: solid; border-color: var(--info-border); background: var(--info-bg); }
+.file-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 13px; }
+.file-chip .ti-file-text { color: var(--info-text); font-size: 18px; }
+.helper-link { font-size: 13px; color: var(--text-2); margin-top: 1rem; text-align: center; }
+.helper-link a { color: var(--info-text); cursor: pointer; }
+
+.summary-row { display: flex; gap: 12px; margin: 0 0 1.25rem; }
+.summary-card { flex: 1; background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; }
+.summary-num { font-size: 22px; font-weight: 500; line-height: 1.1; }
+.summary-label { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+
+.topic { border: 0.5px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; background: var(--surface); }
+.topic-head { padding: 10px 14px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.topic-head .ti-chevron-down { font-size: 16px; color: var(--text-3); transition: transform 0.15s; }
+.topic.open .topic-head .ti-chevron-down { transform: rotate(180deg); }
+.topic-title { flex: 1; font-size: 14px; font-weight: 500; }
+.topic-meta { font-size: 12px; color: var(--text-3); }
+.topic-body { display: none; padding: 0 14px 14px; border-top: 0.5px solid var(--border); margin-top: 4px; }
+.topic.open .topic-body { display: block; }
+.sub-list { list-style: none; padding: 12px 0 0; margin: 0; }
+.sub-list li { font-size: 13px; color: var(--text-2); padding: 6px 0; display: flex; align-items: center; gap: 8px; }
+.sub-list li .ti { font-size: 14px; color: var(--text-3); }
+
+.ai-bar { background: var(--surface-2); border-radius: var(--radius); padding: 10px 12px; display: flex; align-items: center; gap: 10px; margin: 10px 0 0; flex-wrap: wrap; }
+.ai-bar-label { font-size: 12px; color: var(--text-2); }
+.ai-chip { background: var(--surface); border: 0.5px solid var(--border); border-radius: 14px; padding: 4px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
+.ai-chip .ti { font-size: 13px; color: var(--info-text); }
+.ai-chip:hover { background: var(--surface-2); border-color: var(--border-strong); }
+
+.global-ai { margin-bottom: 1.25rem; padding: 14px 16px; background: var(--info-bg); border-radius: var(--radius); display: flex; align-items: center; gap: 12px; }
+.global-ai .ti-sparkles { color: var(--info-text); font-size: 22px; }
+.global-ai .ga-text { flex: 1; font-size: 13px; color: var(--info-text); }
+.global-ai .ga-title { font-weight: 500; font-size: 14px; margin-bottom: 2px; color: var(--info-text); }
+.global-ai button { background: var(--surface); color: var(--info-text); border: 0.5px solid var(--border-strong); padding: 7px 14px; border-radius: var(--radius); font-size: 13px; cursor: pointer; }
+.global-ai button:hover { background: var(--surface-2); }
+
+.field { margin-bottom: 1rem; }
+.field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+.field input, .field select { width: 100%; padding: 8px 12px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); font-family: inherit; color: var(--text); }
+.field input:focus, .field select:focus { outline: none; box-shadow: 0 0 0 2px var(--info-bg); border-color: var(--info-border); }
+.field-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+
+.palette-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 8px 0 1.5rem; }
+.palette-card { border: 0.5px solid var(--border); border-radius: var(--radius); padding: 12px; cursor: pointer; background: var(--surface); }
+.palette-card.selected { border: 2px solid var(--info-border); padding: 11px; }
+.palette-name { font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.palette-swatch { display: flex; gap: 4px; }
+.palette-swatch span { flex: 1; height: 24px; border-radius: 4px; }
+
+details { background: var(--surface-2); border-radius: var(--radius); padding: 12px 16px; margin-top: 1rem; }
+details summary { font-size: 14px; color: var(--text-2); cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+details summary::-webkit-details-marker { display: none; }
+details summary .ti { font-size: 14px; transition: transform 0.15s; }
+details[open] summary .ti { transform: rotate(180deg); }
+details .adv-body { margin-top: 14px; padding-top: 14px; border-top: 0.5px solid var(--border); }
+details input[type=range] { width: 100%; }
+
+.moodle-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 1.25rem; }
+.moodle-card { border: 0.5px solid var(--border); border-radius: var(--radius); padding: 20px 16px; cursor: pointer; background: var(--surface); text-align: center; }
+.moodle-card.selected { border: 2px solid var(--info-border); padding: 19px 15px; background: var(--info-bg); }
+.moodle-card .ti { font-size: 28px; color: var(--info-text); margin-bottom: 8px; display: block; }
+.moodle-card-title { font-size: 14px; font-weight: 500; }
+.moodle-card-sub { font-size: 12px; color: var(--text-2); margin-top: 4px; }
+.moodle-form { display: none; }
+.moodle-form.show { display: block; }
+
+.placement-option { display: flex; gap: 10px; padding: 12px 14px; border: 0.5px solid var(--border); border-radius: var(--radius); cursor: pointer; background: var(--surface); margin-bottom: 8px; align-items: flex-start; transition: all 0.1s; }
+.placement-option.selected { border: 2px solid var(--info-border); padding: 11px 13px; background: var(--info-bg); }
+.placement-option input[type=radio] { margin: 3px 0 0; width: auto; flex-shrink: 0; }
+.placement-option > div { flex: 1; }
+.po-title { font-size: 14px; font-weight: 500; margin-bottom: 4px; color: var(--text); }
+.po-title .po-badge { font-size: 11px; color: var(--info-text); background: var(--surface); border: 0.5px solid var(--info-border); border-radius: 10px; padding: 1px 8px; margin-left: 6px; font-weight: 500; vertical-align: 1px; }
+.po-desc { font-size: 13px; color: var(--text-2); line-height: 1.5; }
+.po-desc em { font-style: normal; background: rgba(0,0,0,0.05); padding: 1px 6px; border-radius: 3px; font-size: 12px; color: var(--text); }
+.po-desc .inline-select { display: inline-block; margin: 6px 0 0; }
+.po-desc select { padding: 5px 10px; font-size: 13px; border: 0.5px solid var(--border-strong); border-radius: 6px; background: var(--surface); font-family: inherit; color: var(--text); width: auto; }
+.po-desc select:disabled { opacity: 0.55; cursor: not-allowed; }
+.field-label-strong { font-size: 14px; font-weight: 500; color: var(--text); margin-bottom: 10px; display: block; }
+
+.demo-toggle { display: flex; justify-content: center; align-items: center; gap: 8px; margin: 0 0 1.25rem; font-size: 12px; }
+.demo-toggle span { color: var(--text-3); }
+.demo-toggle button { background: var(--surface); border: 0.5px solid var(--border); border-radius: 14px; padding: 4px 12px; font-size: 12px; cursor: pointer; color: var(--text-2); font-family: inherit; }
+.demo-toggle button.active { background: var(--info-bg); color: var(--info-text); border-color: var(--info-border); }
+
+.file-chip-list { display: flex; flex-direction: column; gap: 6px; max-width: 380px; margin: 0 auto; }
+.file-chip-list .file-chip { justify-content: flex-start; }
+
+.home-screen { background: var(--surface); border-radius: var(--radius-lg); border: 0.5px solid var(--border); padding: 2.5rem 2.25rem; }
+.home-header { margin-bottom: 1.75rem; }
+.home-header h1 { font-size: 28px; font-weight: 500; margin: 0; line-height: 1.15; }
+.home-header p { font-size: 14px; color: var(--text-2); margin: 6px 0 0; }
+
+.home-cta { margin-bottom: 2.25rem; }
+.btn-hero { width: 100%; padding: 18px 24px; background: var(--text); color: var(--surface); border: none; border-radius: var(--radius); font-size: 16px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; font-family: inherit; transition: background 0.1s; }
+.btn-hero:hover { background: var(--text-2); }
+.btn-hero .ti { font-size: 22px; }
+
+.section-title { font-size: 13px; font-weight: 500; color: var(--text-3); margin: 0 0 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.course-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.course-card { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.1s; }
+.course-card:hover { border-color: var(--border-strong); }
+.course-card-title { font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text); word-break: break-word; }
+.course-card-meta { display: flex; flex-wrap: wrap; gap: 5px; font-size: 11px; align-items: center; }
+.course-card-meta span { background: var(--surface-2); padding: 2px 8px; border-radius: 10px; color: var(--text-2); display: inline-flex; align-items: center; gap: 3px; }
+.course-card-meta span.ia { background: #F3E8FF; color: #5B21B6; }
+.course-card-meta .palette-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.course-card-date { font-size: 12px; color: var(--text-3); }
+.course-card-actions { display: flex; gap: 4px; margin-top: auto; padding-top: 10px; border-top: 0.5px solid var(--border); align-items: center; }
+.course-card-actions button { padding: 7px 9px; border: 0.5px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; font-size: 11px; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; gap: 3px; font-family: inherit; transition: all 0.1s; }
+.course-card-actions button:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+.course-card-actions button .ti { font-size: 17px; }
+.course-card-actions .btn-edit { color: #0C447C; background: #E6F1FB; border-color: #B5D4F4; padding: 7px 12px; font-size: 12px; font-weight: 500; gap: 5px; }
+.course-card-actions .btn-edit:hover { background: #C7DEF7; color: #042C53; border-color: #378ADD; }
+.course-card-actions .btn-edit .ti { font-size: 16px; }
+.course-card-actions .btn-delete { margin-left: auto; color: #B82828; background: #FDF2F2; border-color: #F5C2C2; padding: 7px 12px; font-size: 12px; font-weight: 500; gap: 5px; }
+.course-card-actions .btn-delete:hover { background: #FCD4D4; color: #8B1F1F; border-color: #B82828; }
+.course-card-actions .btn-delete .ti { font-size: 16px; }
+
+.wizard-back-row { margin-bottom: 1.25rem; }
+.back-to-home { font-size: 13px; color: var(--text-2); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; }
+.back-to-home:hover { color: var(--text); }
+.back-to-home .ti { font-size: 16px; }
+
+.see-all-row { text-align: center; margin-top: 1.25rem; padding-top: 1rem; border-top: 0.5px solid var(--border); }
+.see-all-link { font-size: 13px; color: var(--info-text); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
+.see-all-link:hover { text-decoration: underline; }
+.see-all-link .ti { font-size: 14px; }
+
+.library-screen { background: var(--surface); border-radius: var(--radius-lg); border: 0.5px solid var(--border); padding: 2.25rem; }
+.library-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 8px; }
+.library-head h1 { font-size: 22px; font-weight: 500; margin: 0; }
+.library-head .lib-count { font-size: 13px; color: var(--text-3); }
+
+.library-search { position: relative; margin-bottom: 12px; }
+.library-search .ti-search { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-3); font-size: 18px; pointer-events: none; }
+.library-search input { width: 100%; padding: 10px 12px 10px 38px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); font-family: inherit; color: var(--text); }
+.library-search input:focus { outline: none; box-shadow: 0 0 0 2px var(--info-bg); border-color: var(--info-border); }
+
+.library-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 1.25rem; align-items: center; }
+.lib-filter { background: var(--surface); border: 0.5px solid var(--border); border-radius: 14px; padding: 4px 12px; font-size: 12px; cursor: pointer; color: var(--text-2); font-family: inherit; display: inline-flex; align-items: center; gap: 4px; }
+.lib-filter:hover { background: var(--surface-2); }
+.lib-filter.active { background: var(--info-bg); color: var(--info-text); border-color: var(--info-border); }
+.lib-filter-group { display: inline-flex; gap: 4px; align-items: center; padding-right: 6px; border-right: 0.5px solid var(--border); }
+.lib-filter-group:last-child { border-right: none; }
+.lib-filter-label { font-size: 11px; color: var(--text-3); margin-right: 2px; text-transform: uppercase; letter-spacing: 0.04em; }
+.library-order { margin-left: auto; }
+.library-order select { padding: 5px 10px; font-size: 12px; border: 0.5px solid var(--border); border-radius: var(--radius); background: var(--surface); font-family: inherit; color: var(--text-2); cursor: pointer; }
+
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.library-empty { text-align: center; padding: 3rem 1rem; color: var(--text-3); font-size: 14px; }
+.library-empty .ti { font-size: 32px; display: block; margin-bottom: 8px; }
+
+.course-card { position: relative; }
+.course-card.fading { opacity: 0; transform: scale(0.95); transition: all 0.25s; pointer-events: none; }
+.delete-confirm { position: absolute; inset: 0; background: var(--surface); border: 1.5px solid #C53030; border-radius: var(--radius); display: none; flex-direction: column; align-items: center; justify-content: center; padding: 16px; text-align: center; gap: 10px; }
+.course-card.confirming .delete-confirm { display: flex; }
+.delete-confirm .dc-icon { font-size: 24px; color: #C53030; }
+.delete-confirm .dc-text { font-size: 13px; color: var(--text); line-height: 1.4; }
+.delete-confirm .dc-actions { display: flex; gap: 6px; margin-top: 4px; }
+.delete-confirm .dc-actions button { padding: 6px 14px; font-size: 12px; border-radius: 6px; border: 0.5px solid var(--border-strong); background: var(--surface); cursor: pointer; font-family: inherit; color: var(--text); }
+.delete-confirm .dc-btn-confirm { background: #C53030 !important; color: white !important; border-color: #C53030 !important; }
+.delete-confirm .dc-btn-confirm:hover { background: #9B2424 !important; }
+.delete-confirm .dc-btn-cancel:hover { background: var(--surface-2); }
+
+.done-hero { text-align: center; padding: 1rem 0 1.5rem; }
+.done-hero .ti-circle-check { font-size: 56px; color: var(--success); display: block; margin-bottom: 12px; }
+.done-hero h2 { font-size: 24px; margin: 0; font-weight: 500; }
+.done-files { background: var(--surface-2); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 1.5rem; }
+.done-file { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+.done-file .ti { font-size: 18px; color: var(--info-text); }
+.done-actions { display: flex; gap: 10px; margin-bottom: 1rem; }
+.done-actions button { flex: 1; padding: 12px; font-size: 14px; border-radius: var(--radius); border: 0.5px solid var(--border-strong); background: var(--surface); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-family: inherit; }
+.done-actions button:hover { background: var(--surface-2); }
+.btn-primary { background: var(--text) !important; color: var(--surface) !important; border-color: var(--text) !important; }
+.btn-primary:hover { background: var(--text-2) !important; }
+.done-back { font-size: 13px; color: var(--text-2); text-align: center; }
+.done-back a { color: var(--info-text); cursor: pointer; }
+
+.nav { display: flex; justify-content: space-between; align-items: center; margin-top: 1.75rem; padding-top: 1.25rem; border-top: 0.5px solid var(--border); }
+.nav button { padding: 9px 18px; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; border-radius: var(--radius); border: 0.5px solid var(--border-strong); background: var(--surface); cursor: pointer; font-family: inherit; color: var(--text); }
+.nav button:hover { background: var(--surface-2); }
+.nav .btn-next { background: var(--text); color: var(--surface); border-color: var(--text); }
+.nav .btn-next:hover { background: var(--text-2); }
+.skip-link { font-size: 12px; color: var(--text-3); }
+.skip-link a { color: var(--text-3); text-decoration: underline; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div class="frame">
+<p class="intro">Mockup interactivo — haz click en los pasos arriba o en los botones de abajo para navegar</p>
+<div class="demo-toggle">
+  <span>Estás viendo el caso de subir:</span>
+  <button id="mode-single">1 archivo Word</button>
+  <button id="mode-multi" class="active">4 archivos (lote)</button>
+</div>
+
+<div class="home-screen" id="home-screen">
+  <div class="home-header">
+    <h1>Hola, Rosario</h1>
+    <p>¿Qué quieres hacer hoy?</p>
+  </div>
+  <div class="home-cta">
+    <button class="btn-hero" id="btn-new-course">
+      <i class="ti ti-plus" aria-hidden="true"></i>
+      Crear curso nuevo
+    </button>
+  </div>
+  <div>
+    <div class="section-title">Cursos recientes</div>
+    <div class="course-grid" id="home-grid">
+      <div class="course-card" data-id="c1" data-title="Humanidades digitales">
+        <div class="course-card-title">Humanidades digitales</div>
+        <div class="course-card-meta">
+          <span><span class="palette-dot" style="background:#1D4ED8"></span>Azul</span>
+          <span>4 temas</span>
+          <span class="ia"><i class="ti ti-sparkles" aria-hidden="true"></i>IA aplicada</span>
+        </div>
+        <div class="course-card-date">Hoy · hace 12 min</div>
+        <div class="course-card-actions">
+          <button title="Descargar"><i class="ti ti-download" aria-hidden="true"></i></button>
+          <button title="Editar este curso" class="btn-edit"><i class="ti ti-edit" aria-hidden="true"></i>Editar</button>
+          <button title="Subir a Moodle"><i class="ti ti-cloud-upload" aria-hidden="true"></i></button>
+          <button title="Borrar este curso" class="btn-delete"><i class="ti ti-trash" aria-hidden="true"></i>Borrar</button>
+        </div>
+        <div class="delete-confirm">
+          <i class="ti ti-alert-triangle dc-icon" aria-hidden="true"></i>
+          <div class="dc-text">¿Borrar <strong>Humanidades digitales</strong>?<br>No se puede deshacer.</div>
+          <div class="dc-actions">
+            <button class="dc-btn-cancel">Cancelar</button>
+            <button class="dc-btn-confirm">Sí, borrar</button>
+          </div>
+        </div>
+      </div>
+      <div class="course-card" data-id="c2" data-title="Reforma gerencialista y Nueva Gestión Pública">
+        <div class="course-card-title">Reforma gerencialista y Nueva Gestión Pública</div>
+        <div class="course-card-meta">
+          <span><span class="palette-dot" style="background:#DC2626"></span>Coral</span>
+          <span>1 tema</span>
+        </div>
+        <div class="course-card-date">Ayer · 18 may</div>
+        <div class="course-card-actions">
+          <button title="Descargar"><i class="ti ti-download" aria-hidden="true"></i></button>
+          <button title="Editar este curso" class="btn-edit"><i class="ti ti-edit" aria-hidden="true"></i>Editar</button>
+          <button title="Subir a Moodle"><i class="ti ti-cloud-upload" aria-hidden="true"></i></button>
+          <button title="Borrar este curso" class="btn-delete"><i class="ti ti-trash" aria-hidden="true"></i>Borrar</button>
+        </div>
+        <div class="delete-confirm">
+          <i class="ti ti-alert-triangle dc-icon" aria-hidden="true"></i>
+          <div class="dc-text">¿Borrar <strong>Reforma gerencialista…</strong>?<br>No se puede deshacer.</div>
+          <div class="dc-actions">
+            <button class="dc-btn-cancel">Cancelar</button>
+            <button class="dc-btn-confirm">Sí, borrar</button>
+          </div>
+        </div>
+      </div>
+      <div class="course-card" data-id="c3" data-title="Certificación IFS Food y BRCGS">
+        <div class="course-card-title">Certificación IFS Food y BRCGS</div>
+        <div class="course-card-meta">
+          <span><span class="palette-dot" style="background:#0F766E"></span>Esmeralda</span>
+          <span>3 temas</span>
+          <span class="ia"><i class="ti ti-sparkles" aria-hidden="true"></i>IA aplicada</span>
+        </div>
+        <div class="course-card-date">16 may</div>
+        <div class="course-card-actions">
+          <button title="Descargar"><i class="ti ti-download" aria-hidden="true"></i></button>
+          <button title="Editar este curso" class="btn-edit"><i class="ti ti-edit" aria-hidden="true"></i>Editar</button>
+          <button title="Subir a Moodle"><i class="ti ti-cloud-upload" aria-hidden="true"></i></button>
+          <button title="Borrar este curso" class="btn-delete"><i class="ti ti-trash" aria-hidden="true"></i>Borrar</button>
+        </div>
+        <div class="delete-confirm">
+          <i class="ti ti-alert-triangle dc-icon" aria-hidden="true"></i>
+          <div class="dc-text">¿Borrar <strong>Certificación IFS Food…</strong>?<br>No se puede deshacer.</div>
+          <div class="dc-actions">
+            <button class="dc-btn-cancel">Cancelar</button>
+            <button class="dc-btn-confirm">Sí, borrar</button>
+          </div>
+        </div>
+      </div>
+      <div class="course-card" data-id="c4" data-title="Norma GLOBALG.A.P. — Introducción">
+        <div class="course-card-title">Norma GLOBALG.A.P. — Introducción</div>
+        <div class="course-card-meta">
+          <span><span class="palette-dot" style="background:#1D4ED8"></span>Azul</span>
+          <span>1 tema</span>
+        </div>
+        <div class="course-card-date">15 may</div>
+        <div class="course-card-actions">
+          <button title="Descargar"><i class="ti ti-download" aria-hidden="true"></i></button>
+          <button title="Editar este curso" class="btn-edit"><i class="ti ti-edit" aria-hidden="true"></i>Editar</button>
+          <button title="Subir a Moodle"><i class="ti ti-cloud-upload" aria-hidden="true"></i></button>
+          <button title="Borrar este curso" class="btn-delete"><i class="ti ti-trash" aria-hidden="true"></i>Borrar</button>
+        </div>
+        <div class="delete-confirm">
+          <i class="ti ti-alert-triangle dc-icon" aria-hidden="true"></i>
+          <div class="dc-text">¿Borrar <strong>Norma GLOBALG.A.P…</strong>?<br>No se puede deshacer.</div>
+          <div class="dc-actions">
+            <button class="dc-btn-cancel">Cancelar</button>
+            <button class="dc-btn-confirm">Sí, borrar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="see-all-row">
+      <a class="see-all-link" id="see-all-link">Ver todos mis cursos (12) <i class="ti ti-arrow-right" aria-hidden="true"></i></a>
+    </div>
+  </div>
+</div>
+
+<div class="library-screen" id="library-screen" style="display:none;">
+  <div class="wizard-back-row">
+    <a class="back-to-home" id="back-to-home-from-lib"><i class="ti ti-arrow-left" aria-hidden="true"></i>Volver al inicio</a>
+  </div>
+  <div class="library-head">
+    <h1>Todos mis cursos</h1>
+    <span class="lib-count" id="lib-count">12 cursos</span>
+  </div>
+  <div class="library-search">
+    <i class="ti ti-search" aria-hidden="true"></i>
+    <input type="text" id="lib-search" placeholder="Buscar por título o autor…">
+  </div>
+  <div class="library-filters">
+    <div class="lib-filter-group">
+      <span class="lib-filter-label">Paleta</span>
+      <button class="lib-filter active" data-filter-palette="all">Todas</button>
+      <button class="lib-filter" data-filter-palette="Azul">Azul</button>
+      <button class="lib-filter" data-filter-palette="Esmeralda">Esmeralda</button>
+      <button class="lib-filter" data-filter-palette="Coral">Coral</button>
+      <button class="lib-filter" data-filter-palette="Lavanda">Lavanda</button>
+    </div>
+    <div class="lib-filter-group">
+      <span class="lib-filter-label">IA</span>
+      <button class="lib-filter active" data-filter-ia="all">Todos</button>
+      <button class="lib-filter" data-filter-ia="yes">Con IA</button>
+      <button class="lib-filter" data-filter-ia="no">Sin IA</button>
+    </div>
+    <div class="library-order">
+      <select id="lib-order">
+        <option value="recent">Más reciente primero</option>
+        <option value="old">Más antiguo primero</option>
+        <option value="az">A-Z</option>
+      </select>
+    </div>
+  </div>
+  <div class="library-grid" id="library-grid"></div>
+  <div class="library-empty" id="library-empty" style="display:none;">
+    <i class="ti ti-mood-empty" aria-hidden="true"></i>
+    No hay cursos que coincidan con tu búsqueda
+  </div>
+</div>
+
+<div class="sw" id="wizard-screen" style="display:none;">
+
+<div class="wizard-back-row">
+  <a class="back-to-home" id="back-to-home"><i class="ti ti-arrow-left" aria-hidden="true"></i>Volver al inicio</a>
+</div>
+
+<div class="stepper">
+  <div class="step current" data-step="1">
+    <div class="step-circle">1</div>
+    <div class="step-label">Sube<br>tu Word</div>
+  </div>
+  <div class="step pending" data-step="2">
+    <div class="step-circle">2</div>
+    <div class="step-label">Revisa</div>
+  </div>
+  <div class="step pending" data-step="3">
+    <div class="step-circle">3</div>
+    <div class="step-label">Personaliza</div>
+  </div>
+  <div class="step pending" data-step="4">
+    <div class="step-circle">4</div>
+    <div class="step-label">Moodle</div>
+  </div>
+  <div class="step pending" data-step="5">
+    <div class="step-circle">5</div>
+    <div class="step-label">Descarga</div>
+  </div>
+</div>
+
+<div class="step-content active" data-step="1">
+  <h2 class="lede">Empecemos por tu Word</h2>
+  <p class="sub">Arrastra aquí tu archivo .docx. Del resto nos ocupamos nosotros. Si subes varios, generamos un curso por cada uno.</p>
+  <div class="dropzone dropzone-active">
+    <i class="ti ti-upload" aria-hidden="true"></i>
+    <div id="dropzone-text" style="font-size: 14px; margin-bottom: 12px;">Listo. Tus 4 archivos ya están subidos</div>
+    <div id="dropzone-files-single" style="display:none;">
+      <span class="file-chip"><i class="ti ti-file-text" aria-hidden="true"></i>Tema_4_Alfabetización.docx · 472 KB</span>
+    </div>
+    <div id="dropzone-files-multi" class="file-chip-list">
+      <span class="file-chip"><i class="ti ti-file-text" aria-hidden="true"></i>Tema_1_Introducción.docx · 318 KB</span>
+      <span class="file-chip"><i class="ti ti-file-text" aria-hidden="true"></i>Tema_2_Búsqueda.docx · 412 KB</span>
+      <span class="file-chip"><i class="ti ti-file-text" aria-hidden="true"></i>Tema_3_Citas.docx · 396 KB</span>
+      <span class="file-chip"><i class="ti ti-file-text" aria-hidden="true"></i>Tema_4_Alfabetización.docx · 472 KB</span>
+    </div>
+  </div>
+  <p class="helper-link">¿Es tu primera vez? <a>Descarga la plantilla Word</a> con la estructura preparada.</p>
+</div>
+
+<div class="step-content" data-step="2">
+  <h2 class="lede">Hemos encontrado lo que necesitabas</h2>
+  <p class="sub">Revisa los temas y subapartados. Puedes editar cualquier cosa, mover bloques o mejorar el texto con IA. Cuando estés a gusto, sigue al siguiente paso.</p>
+  <div class="summary-row">
+    <div class="summary-card"><div class="summary-num" id="sum-temas">4</div><div class="summary-label">temas</div></div>
+    <div class="summary-card"><div class="summary-num" id="sum-subs">23</div><div class="summary-label">subapartados</div></div>
+    <div class="summary-card"><div class="summary-num" id="sum-imgs">15</div><div class="summary-label">imágenes</div></div>
+    <div class="summary-card"><div class="summary-num" id="sum-tablas">3</div><div class="summary-label">tablas</div></div>
+  </div>
+  <div class="global-ai">
+    <i class="ti ti-sparkles" aria-hidden="true"></i>
+    <div class="ga-text">
+      <div class="ga-title">¿Quieres que la IA mejore todo el curso de una vez?</div>
+      <div>Glosario, alt-text en imágenes, narración de audio y un banco de preguntas extra.</div>
+    </div>
+    <button>Aplicar a todo</button>
+  </div>
+  <div class="topic open">
+    <div class="topic-head">
+      <i class="ti ti-chevron-down" aria-hidden="true"></i>
+      <span class="topic-title">Tema 1. Introducción a la alfabetización informacional</span>
+      <span class="topic-meta">6 subapartados</span>
+    </div>
+    <div class="topic-body">
+      <ul class="sub-list">
+        <li><i class="ti ti-circle-dot" aria-hidden="true"></i>1.1 ¿Qué es la alfabetización informacional?</li>
+        <li><i class="ti ti-circle-dot" aria-hidden="true"></i>1.2 Modelos teóricos y normas</li>
+        <li><i class="ti ti-circle-dot" aria-hidden="true"></i>1.3 La biblioteca como agente formador</li>
+      </ul>
+      <div class="ai-bar">
+        <span class="ai-bar-label">Mejorar este tema:</span>
+        <span class="ai-chip"><i class="ti ti-sparkles" aria-hidden="true"></i>Reescribir</span>
+        <span class="ai-chip"><i class="ti ti-palette" aria-hidden="true"></i>Ilustrar</span>
+        <span class="ai-chip"><i class="ti ti-volume" aria-hidden="true"></i>Narración</span>
+        <span class="ai-chip"><i class="ti ti-help" aria-hidden="true"></i>+ preguntas</span>
+      </div>
+    </div>
+  </div>
+  <div class="topic">
+    <div class="topic-head">
+      <i class="ti ti-chevron-down" aria-hidden="true"></i>
+      <span class="topic-title">Tema 2. Búsqueda y evaluación de fuentes</span>
+      <span class="topic-meta">5 subapartados</span>
+    </div>
+  </div>
+  <div class="topic">
+    <div class="topic-head">
+      <i class="ti ti-chevron-down" aria-hidden="true"></i>
+      <span class="topic-title">Tema 3. Citas, referencias y propiedad intelectual</span>
+      <span class="topic-meta">7 subapartados</span>
+    </div>
+  </div>
+  <div class="topic">
+    <div class="topic-head">
+      <i class="ti ti-chevron-down" aria-hidden="true"></i>
+      <span class="topic-title">Tema 4. Aplicaciones prácticas en humanidades digitales</span>
+      <span class="topic-meta">5 subapartados</span>
+    </div>
+  </div>
+</div>
+
+<div class="step-content" data-step="3">
+  <h2 class="lede">Pongámosle nombre y colores</h2>
+  <p class="sub">Lo justo para que el curso quede a tu medida. Los valores que vienen marcados funcionan para casi todos los Moodle.</p>
+  <div class="field-grid">
+    <div class="field">
+      <label>Título del curso</label>
+      <input type="text" value="Alfabetización informacional en humanidades digitales">
+    </div>
+    <div class="field">
+      <label>Horas</label>
+      <input type="number" value="20">
+    </div>
+    <div class="field">
+      <label>Autor</label>
+      <input type="text" value="CGD">
+    </div>
+  </div>
+  <div class="field">
+    <label>Paleta de colores</label>
+    <div class="palette-grid">
+      <div class="palette-card selected">
+        <div class="palette-name">Azul</div>
+        <div class="palette-swatch"><span style="background:#0A2540"></span><span style="background:#1D4ED8"></span><span style="background:#DBEAFE"></span></div>
+      </div>
+      <div class="palette-card">
+        <div class="palette-name">Esmeralda</div>
+        <div class="palette-swatch"><span style="background:#022C22"></span><span style="background:#0F766E"></span><span style="background:#CCFBF1"></span></div>
+      </div>
+      <div class="palette-card">
+        <div class="palette-name">Coral</div>
+        <div class="palette-swatch"><span style="background:#7F1D1D"></span><span style="background:#DC2626"></span><span style="background:#FEE2E2"></span></div>
+      </div>
+      <div class="palette-card">
+        <div class="palette-name">Lavanda</div>
+        <div class="palette-swatch"><span style="background:#2E1065"></span><span style="background:#7C3AED"></span><span style="background:#F3E8FF"></span></div>
+      </div>
+    </div>
+  </div>
+  <details>
+    <summary><i class="ti ti-chevron-down" aria-hidden="true"></i>Opciones avanzadas — solo si tu LMS pide algo específico</summary>
+    <div class="adv-body">
+      <div class="field">
+        <label>Versión de SCORM</label>
+        <select><option>Ambas (recomendado — funciona con cualquier Moodle)</option><option>Solo 1.2</option><option>Solo 2004</option></select>
+      </div>
+      <div class="field">
+        <label>Peso de la visualización vs. el quiz en la nota</label>
+        <div style="font-size: 12px; color: var(--text-3); margin-bottom: 6px;">40% visualización · 60% quiz</div>
+        <input type="range" value="40" min="0" max="100">
+      </div>
+      <div class="field">
+        <label>Qué generar como extras</label>
+        <div style="font-size: 13px; color: var(--text-2); line-height: 1.85;">
+          <label style="display:block;"><input type="checkbox" checked style="width:auto;margin-right:6px;"> PDF de apuntes por tema</label>
+          <label style="display:block;"><input type="checkbox" checked style="width:auto;margin-right:6px;"> Validación de accesibilidad (WCAG)</label>
+          <label style="display:block;"><input type="checkbox" style="width:auto;margin-right:6px;"> Glosario automático</label>
+          <label style="display:block;"><input type="checkbox" style="width:auto;margin-right:6px;"> Certificado imprimible</label>
+        </div>
+      </div>
+    </div>
+  </details>
+</div>
+
+<div class="step-content" data-step="4">
+  <h2 class="lede">¿Lo subimos a Moodle?</h2>
+  <p class="sub">Si nos das los datos de tu Moodle, lo dejamos puesto y listo para tus alumnos. Si no, te lo descargas y lo subes tú cuando quieras.</p>
+  <div class="moodle-choice">
+    <div class="moodle-card selected" id="moodle-yes">
+      <i class="ti ti-cloud-upload" aria-hidden="true"></i>
+      <div class="moodle-card-title">Sí, súbelo por mí</div>
+      <div class="moodle-card-sub">Necesitaré tu URL y token</div>
+    </div>
+    <div class="moodle-card" id="moodle-no">
+      <i class="ti ti-download" aria-hidden="true"></i>
+      <div class="moodle-card-title">No, solo descárgalo</div>
+      <div class="moodle-card-sub">Me lo bajo y subo a mano</div>
+    </div>
+  </div>
+  <div class="moodle-form show" id="moodle-form">
+    <div class="field">
+      <label>URL de tu Moodle</label>
+      <input type="url" placeholder="https://moodle.miinstitucion.com">
+    </div>
+    <div class="field">
+      <label>Token de Web Services <span style="color: var(--text-3); font-weight: 400;">(¿cómo conseguirlo?)</span></label>
+      <input type="text" placeholder="Pega aquí el token">
+    </div>
+    <div class="field">
+      <label>Curso de Moodle donde lo subimos</label>
+      <select>
+        <option>Humanidades digitales (id 42)</option>
+        <option>Cocina profesional (id 56)</option>
+        <option>Otro curso…</option>
+      </select>
+    </div>
+
+    <div class="field" style="margin-top: 1.25rem;">
+      <span class="field-label-strong" id="placement-question">¿Cómo organizamos los 4 temas en ese curso?</span>
+
+      <div id="placement-single" style="display:none;">
+        <label class="placement-option selected">
+          <input type="radio" name="ps" value="new" checked>
+          <div>
+            <div class="po-title">Crear sección nueva <span class="po-badge">recomendado</span></div>
+            <div class="po-desc">Crearemos una sección con el nombre del curso: <em>Alfabetización informacional en humanidades digitales</em></div>
+          </div>
+        </label>
+        <label class="placement-option">
+          <input type="radio" name="ps" value="existing">
+          <div>
+            <div class="po-title">Añadir a una sección que ya existe</div>
+            <div class="po-desc">
+              <div class="inline-select">
+                <select disabled>
+                  <option>General (sección 0)</option>
+                  <option>Tema 1: Introducción (sección 1)</option>
+                  <option>Tema 2: Conceptos básicos (sección 2)</option>
+                  <option>Tema 3: Aplicaciones (sección 3)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div id="placement-multi">
+        <label class="placement-option selected">
+          <input type="radio" name="pm" value="new-each" checked>
+          <div>
+            <div class="po-title">Una sección nueva por cada tema <span class="po-badge">recomendado</span></div>
+            <div class="po-desc">Crearemos: <em>Tema 1. Introducción</em>, <em>Tema 2. Búsqueda</em>, <em>Tema 3. Citas</em>, <em>Tema 4. Aplicaciones</em></div>
+          </div>
+        </label>
+        <label class="placement-option">
+          <input type="radio" name="pm" value="all-same">
+          <div>
+            <div class="po-title">Todos juntos en una sección existente</div>
+            <div class="po-desc">
+              Los 4 SCORM aparecerán en la misma sección.
+              <div class="inline-select">
+                <select disabled>
+                  <option>General (sección 0)</option>
+                  <option>Tema 1: Introducción (sección 1)</option>
+                  <option>Tema 2: Conceptos básicos (sección 2)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </label>
+        <label class="placement-option">
+          <input type="radio" name="pm" value="consecutive">
+          <div>
+            <div class="po-title">En 4 secciones consecutivas que ya existen</div>
+            <div class="po-desc">
+              Empezando en
+              <div class="inline-select">
+                <select disabled>
+                  <option>Tema 1: Introducción (sección 1)</option>
+                  <option>Tema 2: Conceptos básicos (sección 2)</option>
+                  <option>Tema 3: Aplicaciones (sección 3)</option>
+                </select>
+              </div>
+              · los demás irán a las siguientes en orden.
+            </div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div style="font-size: 12px; color: var(--text-3); margin-top: 14px;">Tus credenciales se guardan para la próxima vez que subas un curso.</div>
+  </div>
+</div>
+
+<div class="step-content" data-step="5">
+  <div class="done-hero">
+    <i class="ti ti-circle-check" aria-hidden="true"></i>
+    <h2>Tu curso está listo</h2>
+  </div>
+  <div class="done-files" id="done-files-single" style="display:none;">
+    <div class="done-file"><i class="ti ti-file-zip" aria-hidden="true"></i>alfabetizacion_informacional_scorm12.zip · 1.2 MB</div>
+    <div class="done-file"><i class="ti ti-file-zip" aria-hidden="true"></i>alfabetizacion_informacional_scorm2004.zip · 1.3 MB</div>
+    <div class="done-file"><i class="ti ti-file-text" aria-hidden="true"></i>4 PDFs de apuntes (uno por tema)</div>
+    <div class="done-file"><i class="ti ti-check" aria-hidden="true"></i>Validación WCAG: pasa con 2 avisos menores</div>
+  </div>
+  <div class="done-files" id="done-files-multi">
+    <div class="done-file"><i class="ti ti-file-zip" aria-hidden="true"></i>4 paquetes SCORM (uno por tema, en versiones 1.2 y 2004)</div>
+    <div class="done-file"><i class="ti ti-file-text" aria-hidden="true"></i>4 PDFs de apuntes (apuntes_T01.pdf … apuntes_T04.pdf)</div>
+    <div class="done-file"><i class="ti ti-cloud-upload" aria-hidden="true"></i>Listos para subir a Moodle como 4 secciones nuevas</div>
+    <div class="done-file"><i class="ti ti-check" aria-hidden="true"></i>Validación WCAG: pasa con 2 avisos menores</div>
+  </div>
+  <div class="done-actions">
+    <button class="btn-primary"><i class="ti ti-download" aria-hidden="true"></i>Descargar todo</button>
+    <button><i class="ti ti-cloud-upload" aria-hidden="true"></i>Subir a Moodle ahora</button>
+  </div>
+  <div class="done-back">¿Quieres seguir mejorándolo con IA? <a id="back-to-2">Vuelve al paso 2</a>. O <a id="back-to-home-from-5">vuelve al inicio</a>.</div>
+</div>
+
+<div class="nav">
+  <button class="btn-back"><i class="ti ti-arrow-left" aria-hidden="true"></i>Atrás</button>
+  <span class="skip-link"><a id="skip">Saltar al final con los valores por defecto</a></span>
+  <button class="btn-next">Continuar<i class="ti ti-arrow-right" aria-hidden="true"></i></button>
+</div>
+
+</div>
+</div>
+
+<script>
+(function() {
+  const root = document.querySelector('.sw');
+  let current = 1;
+  const total = 5;
+  function go(n) {
+    if (n < 1 || n > total) return;
+    current = n;
+    root.querySelectorAll('.step').forEach((el, i) => {
+      const s = i + 1;
+      el.classList.remove('current', 'completed', 'pending');
+      if (s < n) el.classList.add('completed');
+      else if (s === n) el.classList.add('current');
+      else el.classList.add('pending');
+    });
+    root.querySelectorAll('.step-content').forEach(el => {
+      el.classList.toggle('active', Number(el.dataset.step) === n);
+    });
+    const back = root.querySelector('.btn-back');
+    const next = root.querySelector('.btn-next');
+    back.style.visibility = (n === 1) ? 'hidden' : 'visible';
+    if (n === total) { next.style.display = 'none'; }
+    else {
+      next.style.display = '';
+      next.innerHTML = (n === 4 ? 'Generar curso' : 'Continuar') + '<i class="ti ti-arrow-right" aria-hidden="true"></i>';
+    }
+    root.querySelector('.skip-link').style.visibility = (n >= 4) ? 'hidden' : 'visible';
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  }
+  root.querySelectorAll('.step').forEach((el, i) => el.addEventListener('click', () => go(i + 1)));
+  root.querySelector('.btn-back').addEventListener('click', () => go(current - 1));
+  root.querySelector('.btn-next').addEventListener('click', () => go(current + 1));
+  root.querySelector('#skip').addEventListener('click', () => go(5));
+  root.querySelector('#back-to-2').addEventListener('click', () => go(2));
+  root.querySelectorAll('.topic-head').forEach(h => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
+  root.querySelectorAll('.palette-card').forEach(c => c.addEventListener('click', () => {
+    root.querySelectorAll('.palette-card').forEach(x => x.classList.remove('selected'));
+    c.classList.add('selected');
+  }));
+  const my = root.querySelector('#moodle-yes'), mn = root.querySelector('#moodle-no'), mf = root.querySelector('#moodle-form');
+  my.addEventListener('click', () => { my.classList.add('selected'); mn.classList.remove('selected'); mf.classList.add('show'); });
+  mn.addEventListener('click', () => { mn.classList.add('selected'); my.classList.remove('selected'); mf.classList.remove('show'); });
+
+  // Toggle de modo demo (1 archivo vs varios)
+  const btnSingle = document.getElementById('mode-single');
+  const btnMulti = document.getElementById('mode-multi');
+  function applyMode(mode) {
+    btnSingle.classList.toggle('active', mode === 'single');
+    btnMulti.classList.toggle('active', mode === 'multi');
+    // Paso 1: chips
+    document.getElementById('dropzone-text').textContent =
+      mode === 'single' ? 'Listo. Tu archivo ya está subido' : 'Listo. Tus 4 archivos ya están subidos';
+    document.getElementById('dropzone-files-single').style.display = mode === 'single' ? '' : 'none';
+    document.getElementById('dropzone-files-multi').style.display = mode === 'multi' ? '' : 'none';
+    // Paso 2: contadores
+    if (mode === 'single') {
+      document.getElementById('sum-temas').textContent = '1';
+      document.getElementById('sum-subs').textContent = '6';
+      document.getElementById('sum-imgs').textContent = '4';
+      document.getElementById('sum-tablas').textContent = '1';
+    } else {
+      document.getElementById('sum-temas').textContent = '4';
+      document.getElementById('sum-subs').textContent = '23';
+      document.getElementById('sum-imgs').textContent = '15';
+      document.getElementById('sum-tablas').textContent = '3';
+    }
+    // Paso 4: pregunta y bloques de opciones
+    document.getElementById('placement-question').textContent =
+      mode === 'single' ? '¿Dónde lo colocamos?' : '¿Cómo organizamos los 4 temas en ese curso?';
+    document.getElementById('placement-single').style.display = mode === 'single' ? '' : 'none';
+    document.getElementById('placement-multi').style.display = mode === 'multi' ? '' : 'none';
+    // Paso 5: archivos
+    document.getElementById('done-files-single').style.display = mode === 'single' ? '' : 'none';
+    document.getElementById('done-files-multi').style.display = mode === 'multi' ? '' : 'none';
+  }
+  btnSingle.addEventListener('click', () => applyMode('single'));
+  btnMulti.addEventListener('click', () => applyMode('multi'));
+
+  // Radios del paso 4: marcar selected y habilitar selects de la opción activa
+  function wireRadios(groupName) {
+    const radios = root.querySelectorAll('input[name="' + groupName + '"]');
+    radios.forEach(r => r.addEventListener('change', () => {
+      radios.forEach(other => {
+        const label = other.closest('.placement-option');
+        const isSel = other.checked;
+        label.classList.toggle('selected', isSel);
+        // habilitar/deshabilitar selects: solo el de la opción seleccionada queda activo
+        label.querySelectorAll('select').forEach(s => { s.disabled = !isSel; });
+      });
+    }));
+    // Estado inicial: el radio checked tiene su select activo
+    radios.forEach(r => {
+      if (r.checked) {
+        r.closest('.placement-option').querySelectorAll('select').forEach(s => { s.disabled = false; });
+      }
+    });
+  }
+  wireRadios('ps');
+  wireRadios('pm');
+
+  // Navegación entre home y wizard
+  const homeScreen = document.getElementById('home-screen');
+  const wizardScreen = document.getElementById('wizard-screen');
+  const libraryScreen = document.getElementById('library-screen');
+  function hideAll() {
+    homeScreen.style.display = 'none';
+    wizardScreen.style.display = 'none';
+    libraryScreen.style.display = 'none';
+  }
+  function showHome() { hideAll(); homeScreen.style.display = ''; window.scrollTo({top: 0, behavior: 'smooth'}); }
+  function showWizard() { hideAll(); wizardScreen.style.display = ''; go(1); window.scrollTo({top: 0, behavior: 'smooth'}); }
+  function showLibrary() { hideAll(); libraryScreen.style.display = ''; renderLibrary(); window.scrollTo({top: 0, behavior: 'smooth'}); }
+
+  document.getElementById('btn-new-course').addEventListener('click', showWizard);
+  document.getElementById('back-to-home').addEventListener('click', showHome);
+  document.getElementById('back-to-home-from-5').addEventListener('click', showHome);
+  document.getElementById('back-to-home-from-lib').addEventListener('click', showHome);
+  document.getElementById('see-all-link').addEventListener('click', showLibrary);
+
+  // ---- Datos simulados de la biblioteca ----
+  const PALETTES = {
+    Azul: '#1D4ED8', Esmeralda: '#0F766E', Coral: '#DC2626', Lavanda: '#7C3AED'
+  };
+  let courses = [
+    { id: 'c1',  title: 'Humanidades digitales',                    palette: 'Azul',      temas: 4, ia: true,  date: '19 may', dateNum: 519 },
+    { id: 'c2',  title: 'Reforma gerencialista y Nueva Gestión Pública', palette: 'Coral', temas: 1, ia: false, date: '18 may', dateNum: 518 },
+    { id: 'c3',  title: 'Certificación IFS Food y BRCGS',           palette: 'Esmeralda', temas: 3, ia: true,  date: '16 may', dateNum: 516 },
+    { id: 'c4',  title: 'Norma GLOBALG.A.P. — Introducción',         palette: 'Azul',      temas: 1, ia: false, date: '15 may', dateNum: 515 },
+    { id: 'c5',  title: 'Cocina profesional — Bloque 1',             palette: 'Esmeralda', temas: 5, ia: false, date: '12 may', dateNum: 512 },
+    { id: 'c6',  title: 'Riesgos laborales en hostelería',           palette: 'Coral',     temas: 3, ia: true,  date: '10 may', dateNum: 510 },
+    { id: 'c7',  title: 'Inglés A2 para turismo',                    palette: 'Azul',      temas: 4, ia: false, date: '5 may',  dateNum: 505 },
+    { id: 'c8',  title: 'Atención al cliente avanzada',              palette: 'Lavanda',   temas: 2, ia: true,  date: '3 may',  dateNum: 503 },
+    { id: 'c9',  title: 'Manipulador de alimentos',                  palette: 'Esmeralda', temas: 1, ia: false, date: '1 may',  dateNum: 501 },
+    { id: 'c10', title: 'Privacidad y RGPD para empresas',           palette: 'Coral',     temas: 2, ia: true,  date: '28 abr', dateNum: 428 },
+    { id: 'c11', title: 'Excel intermedio',                          palette: 'Lavanda',   temas: 6, ia: false, date: '20 abr', dateNum: 420 },
+    { id: 'c12', title: 'Liderazgo de equipos',                      palette: 'Azul',      temas: 4, ia: true,  date: '15 abr', dateNum: 415 },
+  ];
+  const filters = { palette: 'all', ia: 'all', search: '', order: 'recent' };
+
+  function cardHtml(c) {
+    return `
+      <div class="course-card" data-id="${c.id}">
+        <div class="course-card-title">${c.title}</div>
+        <div class="course-card-meta">
+          <span><span class="palette-dot" style="background:${PALETTES[c.palette]}"></span>${c.palette}</span>
+          <span>${c.temas} ${c.temas === 1 ? 'tema' : 'temas'}</span>
+          ${c.ia ? '<span class="ia"><i class="ti ti-sparkles" aria-hidden="true"></i>IA aplicada</span>' : ''}
+        </div>
+        <div class="course-card-date">${c.date}</div>
+        <div class="course-card-actions">
+          <button title="Descargar"><i class="ti ti-download" aria-hidden="true"></i></button>
+          <button title="Editar este curso" class="btn-edit"><i class="ti ti-edit" aria-hidden="true"></i>Editar</button>
+          <button title="Subir a Moodle"><i class="ti ti-cloud-upload" aria-hidden="true"></i></button>
+          <button title="Borrar este curso" class="btn-delete"><i class="ti ti-trash" aria-hidden="true"></i>Borrar</button>
+        </div>
+        <div class="delete-confirm">
+          <i class="ti ti-alert-triangle dc-icon" aria-hidden="true"></i>
+          <div class="dc-text">¿Borrar <strong>${c.title.length > 32 ? c.title.slice(0,30)+'…' : c.title}</strong>?<br>No se puede deshacer.</div>
+          <div class="dc-actions">
+            <button class="dc-btn-cancel">Cancelar</button>
+            <button class="dc-btn-confirm">Sí, borrar</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderLibrary() {
+    let list = courses.slice();
+    if (filters.search) {
+      const q = filters.search.toLowerCase();
+      list = list.filter(c => c.title.toLowerCase().includes(q));
+    }
+    if (filters.palette !== 'all') list = list.filter(c => c.palette === filters.palette);
+    if (filters.ia === 'yes') list = list.filter(c => c.ia);
+    if (filters.ia === 'no') list = list.filter(c => !c.ia);
+    if (filters.order === 'recent') list.sort((a,b) => b.dateNum - a.dateNum);
+    else if (filters.order === 'old') list.sort((a,b) => a.dateNum - b.dateNum);
+    else if (filters.order === 'az') list.sort((a,b) => a.title.localeCompare(b.title));
+    const grid = document.getElementById('library-grid');
+    const empty = document.getElementById('library-empty');
+    if (list.length === 0) {
+      grid.innerHTML = '';
+      empty.style.display = '';
+    } else {
+      empty.style.display = 'none';
+      grid.innerHTML = list.map(cardHtml).join('');
+    }
+    document.getElementById('lib-count').textContent = `${courses.length} ${courses.length === 1 ? 'curso' : 'cursos'}`;
+    wireDeleteIn(grid);
+  }
+
+  document.getElementById('lib-search').addEventListener('input', (e) => {
+    filters.search = e.target.value;
+    renderLibrary();
+  });
+  document.getElementById('lib-order').addEventListener('change', (e) => {
+    filters.order = e.target.value;
+    renderLibrary();
+  });
+  document.querySelectorAll('[data-filter-palette]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-filter-palette]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      filters.palette = btn.dataset.filterPalette;
+      renderLibrary();
+    });
+  });
+  document.querySelectorAll('[data-filter-ia]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-filter-ia]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      filters.ia = btn.dataset.filterIa;
+      renderLibrary();
+    });
+  });
+
+  // ---- Borrado con confirmador inline ----
+  function wireDeleteIn(container) {
+    container.querySelectorAll('.btn-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.course-card');
+        // Cerrar cualquier otro confirmador abierto
+        document.querySelectorAll('.course-card.confirming').forEach(c => {
+          if (c !== card) c.classList.remove('confirming');
+        });
+        card.classList.add('confirming');
+      });
+    });
+    container.querySelectorAll('.dc-btn-cancel').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        btn.closest('.course-card').classList.remove('confirming');
+      });
+    });
+    container.querySelectorAll('.dc-btn-confirm').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.course-card');
+        const id = card.dataset.id;
+        card.classList.add('fading');
+        setTimeout(() => {
+          courses = courses.filter(c => c.id !== id);
+          card.remove();
+          // Actualizar el contador "Ver todos mis cursos (N)"
+          const link = document.getElementById('see-all-link');
+          if (link) link.innerHTML = `Ver todos mis cursos (${courses.length}) <i class="ti ti-arrow-right" aria-hidden="true"></i>`;
+          // Si estamos en la biblioteca, recargar contador y vista vacía
+          if (libraryScreen.style.display !== 'none') renderLibrary();
+        }, 250);
+      });
+    });
+  }
+  wireDeleteIn(document.getElementById('home-grid'));
+
+  go(1);
+})();
+</script>
+
+</body>
+</html>

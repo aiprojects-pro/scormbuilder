@@ -286,18 +286,26 @@ def build_complete_course(
             course.metadata.view_strategy = v
 
     # 2. Resolver tema
+    # v0.6.6: el parámetro `theme` del usuario SIEMPRE gana sobre la paleta
+    # del docx. Antes hacíamos lo contrario, pero como el docx siempre tiene
+    # `palette='azul'` por defecto, eso sobrescribía la elección del usuario
+    # en la UI. La paleta del docx solo se usa si el llamante no pasa theme.
     if custom_palette:
         theme_obj = make_custom_theme(**custom_palette)
     elif isinstance(theme, Theme):
         theme_obj = theme
     else:
-        # Si la paleta del documento es válida, prevalece sobre el parámetro por defecto
+        # Usar el theme pasado como parámetro. Si por alguna razón es vacío
+        # o inválido, caer a la paleta del docx, y como último recurso, "azul".
         from scorm_builder.themes import THEMES
-        palette_doc = course.metadata.palette
-        if palette_doc in THEMES:
-            theme_obj = get_theme(palette_doc)
-        else:
+        if theme and theme in THEMES:
             theme_obj = get_theme(theme)
+        else:
+            palette_doc = course.metadata.palette
+            if palette_doc in THEMES:
+                theme_obj = get_theme(palette_doc)
+            else:
+                theme_obj = get_theme("azul")
 
     # 3. Generar PDFs (antes del render para conocer los nombres y añadir el botón)
     # v0.6: pasamos la carpeta de imágenes extraídas para que el PDF las incluya.
@@ -484,12 +492,17 @@ def rebuild_from_structure(
     elif isinstance(theme, Theme):
         theme_obj = theme
     else:
+        # v0.6.6: parámetro `theme` prevalece sobre paleta del docx (la del
+        # docx solo se usa si el parámetro no es válido)
         from scorm_builder.themes import THEMES
-        palette_doc = course.metadata.palette
-        if palette_doc in THEMES:
-            theme_obj = get_theme(palette_doc)
-        else:
+        if theme and theme in THEMES:
             theme_obj = get_theme(theme)
+        else:
+            palette_doc = course.metadata.palette
+            if palette_doc in THEMES:
+                theme_obj = get_theme(palette_doc)
+            else:
+                theme_obj = get_theme("azul")
 
     # v0.6: si los temas ya tienen audio_filename, y si vamos a regenerar
     # PDFs, propagar ambos al render para los botones de descarga.

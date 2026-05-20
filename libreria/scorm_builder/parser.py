@@ -619,6 +619,10 @@ def parse_docx(
     list_buffer_extras: List[ExtraBlock] = []  # imágenes / vídeos pendientes
     list_type: Optional[BlockType] = None
     intro_buffer: List[str] = []  # texto antes del primer h2 de cada tema
+    # v0.6.5: buffer de extras (imágenes, vídeos) que aparecen entre el título
+    # del tema y el primer subapartado. Antes se perdían silenciosamente.
+    # Se vacían al inicio del primer subapartado del tema.
+    pre_subsection_extras: List[ExtraBlock] = []
 
     p_index = 0
 
@@ -729,7 +733,18 @@ def parse_docx(
             flush_list()
             flush_quiz()
             flush_intro()
-            topic_number = len(course.topics) + 1
+            # v0.6.6: si el título lleva "Tema N", "Módulo N", "Unidad N", etc.,
+            # extraemos ese N para usarlo como número del tema. Esto es lo que
+            # quiere el usuario cuando sube docx individuales con títulos como
+            # "Tema 2. Evolución..." → topic.number = 2 (no 1 secuencial).
+            number_match = re.match(
+                r"^\s*(tema|módulo|modulo|unidad|capítulo|capitulo|lección|leccion)\s+(\d+)[\.\s\-:]",
+                text, flags=re.IGNORECASE,
+            )
+            if number_match:
+                topic_number = int(number_match.group(2))
+            else:
+                topic_number = len(course.topics) + 1
             # Limpiar título: quitar "Tema N.", "Módulo N.", etc.
             title_clean = re.sub(
                 r"^\s*(tema|módulo|modulo|unidad|capítulo|capitulo|lección|leccion)\s+\d+[\.\s\-:]\s*",
@@ -742,6 +757,8 @@ def parse_docx(
             course.topics.append(current_topic)
             current_subsection = None
             in_quiz = False
+            # v0.6.5: resetear el buffer de extras pendientes para el nuevo tema
+            pre_subsection_extras = []
             continue
 
         # Si todavía no hay tema, ignorar
@@ -770,6 +787,13 @@ def parse_docx(
                 title=title_clean,
             )
             current_topic.subsections.append(current_subsection)
+            # v0.6.5: si hay extras pendientes (imágenes/vídeos entre el título
+            # del tema y este primer subapartado), emitirlos AHORA al inicio
+            # del subapartado para que no se pierdan.
+            if pre_subsection_extras:
+                for ex in pre_subsection_extras:
+                    _emit_extra_block(current_subsection, ex)
+                pre_subsection_extras = []
             continue
 
         # Si estamos dentro del quiz, acumular
@@ -816,6 +840,11 @@ def parse_docx(
         if current_subsection is None:
             if text and not text.startswith("---"):
                 intro_buffer.append(text)
+            # v0.6.5: las imágenes/vídeos antes del primer subapartado se
+            # guardan en un buffer y se vuelcan al inicio del primer
+            # subapartado cuando se cree (no se descartan silenciosamente).
+            if extras:
+                pre_subsection_extras.extend(extras)
             continue
 
         # Caso: párrafo sin texto pero con extras (imagen suelta en el Word)
