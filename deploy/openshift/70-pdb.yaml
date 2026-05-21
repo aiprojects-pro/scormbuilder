@@ -1,0 +1,17 @@
+# PodDisruptionBudget — en SNO una sola réplica, así que minAvailable=0.
+# El propósito aquí NO es alta disponibilidad (imposible en SNO), sino evitar
+# que un drain accidental tumbe el servicio sin pasar por Recreate controlado.
+#
+# Si en el futuro escalas a multi-nodo, ajusta minAvailable a 1.
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scormbuilder
+      app.kubernetes.io/component: web

@@ -1,0 +1,98 @@
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --ink: #0F172A; --ink-soft: #1E293B; --ink-mute: #475569;
+  --paper: #F8FAFC; --paper-warm: #F1F5F9; --paper-deep: #E2E8F0;
+  --primary-deep: #0A2540; --primary: #1D4ED8; --primary-bright: #2563EB;
+  --primary-pale: #DBEAFE; --primary-mist: #EFF6FF;
+  --ok: #059669; --warn: #D97706; --alert: #DC2626;
+}
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--paper); color: var(--ink); line-height: 1.6; min-height: 100vh;
+}
+a { color: var(--primary); text-decoration: none; }
+a:hover { color: var(--primary-deep); text-decoration: underline; }
+header.topbar {
+  background: var(--primary-deep); color: white; padding: 1rem 0;
+  border-bottom: 4px solid var(--primary-bright); position: sticky; top: 0; z-index: 100;
+}
+.topbar .inner {
+  max-width: 1100px; margin: 0 auto; padding: 0 2rem;
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+}
+.topbar h1 {
+  font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em;
+  display: flex; align-items: center; gap: 0.6rem;
+}
+.topbar h1 a { color: white; }
+.topbar h1 a:hover { text-decoration: none; opacity: 0.9; }
+.topbar .badge {
+  background: var(--primary-bright); padding: 0.15rem 0.5rem; border-radius: 4px;
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+}
+.topbar nav { display: flex; gap: 1rem; align-items: center; font-size: 0.95rem; }
+.topbar nav a { color: var(--primary-pale); }
+.topbar nav a:hover { color: white; text-decoration: none; }
+.topbar nav a.active { color: white; font-weight: 600; }
+.topbar .user-chip {
+  background: rgba(255,255,255,0.1); padding: 0.4rem 0.85rem;
+  border-radius: 20px; font-size: 0.85rem;
+}
+main { max-width: 1100px; margin: 2rem auto; padding: 0 2rem 4rem; }
+.card {
+  background: white; border-radius: 12px; padding: 2rem; margin-bottom: 1.5rem;
+  box-shadow: 0 2px 12px rgba(10,37,64,0.06);
+}
+.card h2 {
+  font-size: 1.2rem; color: var(--primary-deep); margin-bottom: 1rem;
+  display: flex; align-items: center; gap: 0.6rem;
+}
+.card h2 .num {
+  background: var(--primary-bright); color: white; width: 28px; height: 28px;
+  border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.85rem; font-weight: 700;
+}
+.field { margin-bottom: 1rem; }
+.field label {
+  display: block; font-size: 0.85rem; font-weight: 600;
+  color: var(--ink-mute); margin-bottom: 0.4rem;
+}
+.field input[type="text"], .field input[type="email"], .field input[type="password"],
+.field input[type="number"], .field select, .field textarea {
+  width: 100%; padding: 0.7rem 0.9rem; border: 1.5px solid var(--paper-deep);
+  border-radius: 8px; font-size: 0.95rem; font-family: inherit; background: white;
+}
+.field input:focus, .field select:focus, .field textarea:focus {
+  outline: none; border-color: var(--primary-bright);
+}
+.field input[type="color"] {
+  width: 100%; height: 44px; border: 1.5px solid var(--paper-deep);
+  border-radius: 8px; cursor: pointer; padding: 4px;
+}
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 600px) { .row { grid-template-columns: 1fr; } }
+.btn {
+  background: var(--primary-deep); color: white; border: none;
+  padding: 0.85rem 1.6rem; border-radius: 8px; font-family: inherit;
+  font-weight: 600; font-size: 0.95rem; cursor: pointer; transition: all 0.15s;
+  display: inline-block; text-decoration: none;
+}
+.btn:hover:not(:disabled) {
+  background: var(--primary-bright); transform: translateY(-1px);
+  text-decoration: none; color: white;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.full { width: 100%; padding: 1rem; }
+.btn.secondary { background: var(--paper-warm); color: var(--ink); border: 1.5px solid var(--paper-deep); }
+.btn.secondary:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
+.btn.danger { background: var(--alert); }
+.btn.danger:hover:not(:disabled) { background: #B91C1C; }
+.flash {
+  padding: 0.85rem 1.1rem; border-radius: 8px; margin-bottom: 1.5rem;
+  font-size: 0.92rem;
+}
+.flash.success { background: #ECFDF5; color: #064E3B; border-left: 4px solid var(--ok); }
+.flash.error { background: #FEF2F2; color: #7F1D1D; border-left: 4px solid var(--alert); }
+.flash.info { background: var(--primary-mist); color: var(--primary-deep); border-left: 4px solid var(--primary-bright); }

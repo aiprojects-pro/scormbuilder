@@ -1,0 +1,29 @@
+# ServiceAccount usado por el sidecar oauth-proxy como client OAuth.
+#
+# La annotation `oauth-redirectreference.primary` declara al OAuth server de
+# OpenShift que cuando un usuario se autentique para este SA, debe redirigir
+# de vuelta a la Route `scormbuilder`. Sin esto, oauth-proxy rechaza el
+# callback.
+#
+# El Secret de cookie (firma de la sesión) se genera con:
+#
+#   oc -n scormbuilder create secret generic scormbuilder-oauth-cookie \
+#       --from-literal=secret="$(openssl rand -base64 32 | head -c 32)"
+#
+# El Secret de TLS (cert para el sidecar) lo genera service-ca operator
+# automáticamente cuando el Service tiene la annotation
+# `service.beta.openshift.io/serving-cert-secret-name`.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scormbuilder-oauth
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: auth
+  annotations:
+    # Le dice al OAuth server: redirige al callback en la Route `scormbuilder`.
+    serviceaccounts.openshift.io/oauth-redirectreference.primary: |
+      {"kind":"OAuthRedirectReference","apiVersion":"v1",
+       "reference":{"kind":"Route","name":"scormbuilder"}}

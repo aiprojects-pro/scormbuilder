@@ -1,0 +1,212 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: web
+  annotations:
+    # Permite a OpenShift resolver el tag de imagen del ImageStream local sin
+    # necesidad de pull externo. La pareja con lookupPolicy.local=true del IS.
+    image.openshift.io/triggers: |
+      [{"from":{"kind":"ImageStreamTag","name":"scormbuilder:latest"},
+        "fieldPath":"spec.template.spec.containers[?(@.name==\"web\")].image"}]
+spec:
+  # SNO + dict global de jobs → 1 réplica. NO escalar horizontalmente.
+  replicas: 1
+  strategy:
+    # Recreate (no rolling) porque el PVC es RWO; durante un rolling el pod
+    # nuevo no podría montarlo hasta que el viejo lo libere → quedaría en
+    # ContainerCreating. Recreate corta y vuelve a levantar.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scormbuilder
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scormbuilder
+        app.kubernetes.io/component: web
+    spec:
+      # SecurityContext a nivel pod: fsGroup=0 alinea con la imagen (chgrp -R 0)
+      # para que el PVC montado herede permisos de escritura del grupo root.
+      # En OpenShift restricted-v2 esto es lo idiomático.
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      # automountServiceAccountToken: false — no necesitamos hablar con la K8s API
+      # OAuth: el sidecar `oauth-proxy` necesita un ServiceAccount con el
+      # annotation `serviceaccounts.openshift.io/oauth-redirectreference`. El
+      # nombre del SA debe coincidir con el que el Route usará como cliente
+      # OAuth. Si NO usas OAuth, ignora esto y deja el ServiceAccount default.
+      serviceAccountName: scormbuilder-oauth
+      automountServiceAccountToken: true
+      containers:
+        # ─────────────────────────────────────────────────────────────────
+        # Container 1: oauth-proxy (sidecar) — opcional
+        # ─────────────────────────────────────────────────────────────────
+        # Termina TLS y autentica contra el OAuth del cluster. Si el usuario
+        # ya tiene sesión OpenShift, entra directamente; si no, se le redirige
+        # al login del cluster.
+        # Comenta este container y reverte serviceAccountName si no quieres OAuth.
+        - name: oauth-proxy
+          image: quay.io/openshift/origin-oauth-proxy:4.14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: oauth-https
+              containerPort: 8443
+              protocol: TCP
+          args:
+            - --provider=openshift
+            - --https-address=:8443
+            - --http-address=
+            - --upstream=http://localhost:8080/
+            - --openshift-service-account=scormbuilder-oauth
+            # Cookies de sesión cifradas con esta secret (montada como volume)
+            - --cookie-secret-file=/etc/oauth/cookie/secret
+            # Certificado TLS firmado por la CA del cluster (service-ca operator)
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            # No proteger /healthz, /readyz, /metrics — Prometheus y kubelet
+            # los necesitan sin auth. El resto de la app SÍ está protegida.
+            - --skip-auth-regex=^/(healthz|readyz|metrics)$
+            # Pasar los headers X-Forwarded-* a la app para auto-login
+            - --pass-user-headers=true
+            - --pass-access-token=false
+            - --set-xauthrequest=true
+            # Solo usuarios autenticados del cluster pueden entrar. Para
+            # restringir más (p.ej. solo un grupo), añadir --openshift-sar.
+            - --email-domain=*
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: oauth-tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: oauth-cookie
+              mountPath: /etc/oauth/cookie
+              readOnly: true
+        # ─────────────────────────────────────────────────────────────────
+        # Container 2: web (la app)
+        # ─────────────────────────────────────────────────────────────────
+        - name: web
+          # OpenShift sustituye este "image" por el del ImageStream
+          # (gracias al annotation image.openshift.io/triggers).
+          image: scormbuilder:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: scormbuilder-config
+            - secretRef:
+                name: scormbuilder-secrets
+          env:
+            # Pista al app: estamos detrás de un Router OpenShift HTTPS.
+            - name: TRUST_PROXY
+              value: "1"
+            # Activar auto-login OAuth (lee X-Forwarded-Email / -User).
+            # Solo seguro si el sidecar oauth-proxy está delante: el
+            # container `web` escucha SOLO en 127.0.0.1:8080 (gunicorn bind a
+            # 0.0.0.0 pero el Service apunta al puerto del proxy).
+            - name: OPENSHIFT_OAUTH_ENABLED
+              value: "1"
+          # Probes — ver health endpoints añadidos en app_local.py.
+          # startupProbe permite tiempo de boot generoso (DB init, fonts, etc.)
+          # antes de que liveness/readiness empiecen a evaluar.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24      # 2 min máximo de boot
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              # Generación SCORM con TTS + IA puede consumir mucho — 4 vCPU /
+              # 4Gi máx. para evitar OOM en builds grandes. Ajustar si tu SNO
+              # tiene poca RAM disponible.
+              cpu: "4"
+              memory: "4Gi"
+              # LVMS: el storage ya viene del PVC; ephemeral-storage es para
+              # /tmp y demás. Limitar para que un fallo no llene el disco del nodo.
+              ephemeral-storage: "2Gi"
+          securityContext:
+            # No-root estricto. UID arbitrario asignado por OpenShift; GID 0
+            # alineado con chgrp -R 0 de la imagen para que /opt/app y /data
+            # sean writables.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # /tmp y /opt/app/.cache son requeridos en runtime aunque tengamos
+            # readOnlyRootFilesystem=true. Los montamos como emptyDir.
+            - name: tmp
+              mountPath: /tmp
+            - name: home-cache
+              mountPath: /opt/app/.cache
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: scormbuilder-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: home-cache
+          emptyDir:
+            sizeLimit: 256Mi
+        # OAuth: TLS cert generado por service-ca operator (anotación en el
+        # Service); cookie secret aleatoria de 32 bytes para firmar la sesión.
+        - name: oauth-tls
+          secret:
+            secretName: scormbuilder-oauth-tls
+            defaultMode: 0440
+        - name: oauth-cookie
+          secret:
+            secretName: scormbuilder-oauth-cookie
+            defaultMode: 0440
+      # SNO: el único nodo está marcado como master. Permitimos schedule ahí.
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule

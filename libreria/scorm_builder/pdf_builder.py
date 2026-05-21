@@ -194,7 +194,12 @@ def _strip_html_for_pdf(text: str) -> str:
 
 
 def _resolve_image_path(src: str, recursos_dir: Optional[Path]) -> Optional[Path]:
-    """Resuelve la ruta real de una imagen para incluirla en el PDF."""
+    """Resuelve la ruta real de una imagen para incluirla en el PDF.
+
+    SEC: cuando se busca dentro de `recursos_dir`, se valida que la ruta
+    resuelta esté efectivamente DENTRO de ese directorio (anti path-traversal
+    vía `src = "recursos/../../etc/passwd.png"`).
+    """
     if not src:
         return None
     if src.startswith(("http://", "https://", "data:")):
@@ -203,11 +208,23 @@ def _resolve_image_path(src: str, recursos_dir: Optional[Path]) -> Optional[Path
     if p.is_absolute() and p.exists():
         return p
     if recursos_dir:
-        candidate = Path(recursos_dir) / p.name
-        if candidate.exists():
+        base = Path(recursos_dir).resolve()
+        # Caso 1: usar solo el basename (siempre seguro: Path.name strip rutas).
+        candidate = (base / p.name).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            candidate = None  # fuera de recursos_dir, descartar
+        if candidate is not None and candidate.exists():
             return candidate
+        # Caso 2: prefijo "recursos/...". Resolvemos y comprobamos containment.
         if src.startswith("recursos/"):
-            candidate = Path(recursos_dir) / src.replace("recursos/", "", 1)
+            inner = src.replace("recursos/", "", 1)
+            candidate = (base / inner).resolve()
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                return None
             if candidate.exists():
                 return candidate
     return None

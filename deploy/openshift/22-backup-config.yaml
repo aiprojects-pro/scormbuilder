@@ -1,0 +1,30 @@
+# ConfigMap con la configuración del sync OFF-cluster del backup.
+#
+# Por defecto OFF (BACKUP_SSH_ENABLED=0). Para activar:
+#   1. Edita los valores de host/user/path/port.
+#   2. Crea el Secret con la clave SSH privada:
+#         oc -n scormbuilder create secret generic scormbuilder-backup-ssh \
+#             --from-file=id_rsa=$HOME/.ssh/id_rsa_backups
+#   3. Cambia BACKUP_SSH_ENABLED a "1" y aplica.
+#   4. El próximo CronJob enviará el tar.gz al host remoto.
+#
+# La clave SSH debe ser una CLAVE DEDICADA (no la personal del admin):
+#   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_rsa_backups -C "scormbuilder-backup"
+# Y dar acceso solo al usuario remoto que recibe los backups (en authorized_keys
+# añade restricción: command="cat > ~/backups/$(date +%s).tar.gz",no-pty,...)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scormbuilder-backup-config
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: backup
+data:
+  BACKUP_SSH_ENABLED: "0"
+  # Edita estos cuatro antes de poner BACKUP_SSH_ENABLED=1:
+  BACKUP_SSH_HOST: "backup-server.tu-empresa.com"
+  BACKUP_SSH_USER: "scormbuilder-backup"
+  BACKUP_SSH_PATH: "/srv/backups/scormbuilder"
+  BACKUP_SSH_PORT: "22"

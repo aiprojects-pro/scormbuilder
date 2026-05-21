@@ -1,6 +1,26 @@
 """Paletas de color y configuración visual del curso."""
+import re
 from dataclasses import dataclass, field
 from typing import Dict
+
+
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def _validate_hex(value: str, field_name: str) -> str:
+    """Valida que `value` sea un color hex `#rgb` / `#rrggbb` / `#rrggbbaa`.
+
+    Esto evita CSS injection vía colores manipulados que se interpolan en
+    `theme_to_css_vars` (y de ahí en el `<style>` del SCORM). Por ejemplo,
+    `red; } body { background:url(...); a {` permitiría reglas arbitrarias
+    si no se valida.
+    """
+    if not isinstance(value, str) or not _HEX_COLOR_RE.match(value.strip()):
+        raise ValueError(
+            f"Color inválido para '{field_name}': se requiere formato hexadecimal "
+            f"(#rgb, #rrggbb o #rrggbbaa). Recibido: {value!r}"
+        )
+    return value.strip()
 
 
 @dataclass
@@ -244,16 +264,21 @@ def make_custom_theme(
     accent: str = "#B8893A",
     name: str = "personalizada",
 ) -> Theme:
-    """Crea una paleta personalizada a partir de los colores que dé el cliente."""
+    """Crea una paleta personalizada a partir de los colores que dé el cliente.
+
+    Cada color se valida con `_validate_hex`: si el llamador (CLI, web form,
+    JSON) pasa un valor que no es un hex válido, se lanza ValueError. Esto
+    evita CSS injection en el SCORM generado.
+    """
     return Theme(
         name=name,
         label="Personalizada",
-        primary_deep=primary_deep,
-        primary=primary,
-        primary_bright=primary_bright,
-        primary_pale=primary_pale,
-        primary_mist=primary_mist,
-        accent=accent,
+        primary_deep=_validate_hex(primary_deep, "primary_deep"),
+        primary=_validate_hex(primary, "primary"),
+        primary_bright=_validate_hex(primary_bright, "primary_bright"),
+        primary_pale=_validate_hex(primary_pale, "primary_pale"),
+        primary_mist=_validate_hex(primary_mist, "primary_mist"),
+        accent=_validate_hex(accent, "accent"),
     )
 
 

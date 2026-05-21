@@ -1,0 +1,26 @@
+# Lo que NO debe entrar en la imagen
+.git
+.gitignore
+.github
+.vscode
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.tox
+.coverage
+htmlcov
+docs/mockups
+docs/*.md
+*.md
+LEEME_PRIMERO.txt
+plantilla
+landing
+libreria/tests
+deploy/openshift
+.DS_Store
+.env
+.env.*

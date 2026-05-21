@@ -1,0 +1,56 @@
+# RBAC para el CronJob de backup.
+#
+# Necesita permisos para:
+#   - listar y leer pods del Deployment principal (saber qué pod scrapear)
+#   - ejecutar comandos dentro del pod (pods/exec) — necesario porque el PVC
+#     de datos es RWO y solo el pod principal lo monta; el backup hace
+#     `tar` desde dentro de ese pod y redirige a su propio volumen.
+#
+# El alcance es NAMESPACED (Role, no ClusterRole). No puede tocar nada
+# fuera del namespace `scormbuilder`.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scormbuilder-backup
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: backup
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scormbuilder-backup
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+rules:
+  # Listar y observar pods para localizar el pod principal del Deployment
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Ejecutar `tar` dentro del pod principal
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Leer logs (útil para diagnóstico, opcional)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scormbuilder-backup
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scormbuilder-backup
+subjects:
+  - kind: ServiceAccount
+    name: scormbuilder-backup
+    namespace: scormbuilder

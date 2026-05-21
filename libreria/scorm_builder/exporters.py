@@ -10,6 +10,7 @@ Estos exportadores son alternativas para distintos casos de uso:
 """
 from __future__ import annotations
 
+import html
 import re
 import shutil
 import zipfile
@@ -110,7 +111,9 @@ def export_html_standalone(course, htmls: Dict[int, str], output_zip: Path) -> P
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
-    # index.html con TOC
+    # index.html con TOC. Todo lo proveniente del docx del usuario (title,
+    # subtitle, author, topic.title) DEBE escaparse antes de inyectarse en
+    # el HTML del index, o un docx con <script> en el título ejecuta JS.
     md = course.metadata
     toc_items = []
     for topic in course.topics:
@@ -119,15 +122,18 @@ def export_html_standalone(course, htmls: Dict[int, str], output_zip: Path) -> P
         n_subs = len(topic.subsections)
         n_quiz = len(topic.quiz)
         toc_items.append(
-            f'      <li><a href="{filename}">{topic.title}'
+            f'      <li><a href="{html.escape(filename, quote=True)}">{html.escape(topic.title, quote=False)}'
             f'<small>{n_subs} subapartados · {n_quiz} preguntas de quiz</small></a></li>'
         )
 
-    subtitle_html = f'<p style="font-size:1.15rem;">{md.subtitle}</p>' if md.subtitle else ""
-    author_html = md.author or "Curso e-learning"
+    subtitle_html = (
+        f'<p style="font-size:1.15rem;">{html.escape(md.subtitle, quote=False)}</p>'
+        if md.subtitle else ""
+    )
+    author_html = html.escape(md.author or "Curso e-learning", quote=False)
 
     index_html = INDEX_HTML_TEMPLATE.format(
-        title=md.title,
+        title=html.escape(md.title, quote=False),
         subtitle_html=subtitle_html,
         author_html=author_html,
         toc_items="\n".join(toc_items),
@@ -135,13 +141,16 @@ def export_html_standalone(course, htmls: Dict[int, str], output_zip: Path) -> P
     )
     (work / "index.html").write_text(index_html, encoding="utf-8")
 
-    # Un HTML por tema (con SCORM API neutralizada)
+    # Un HTML por tema (con SCORM API neutralizada).
+    # Nota: usamos `topic_html` (no `html`) para no sombrear el módulo `html`
+    # importado arriba — Python trataría toda la función como dueña de la
+    # variable local `html` y rompería los `html.escape(...)` de más arriba.
     for topic in course.topics:
         slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", topic.title.lower())[:40] or f"tema_{topic.number}"
         filename = f"tema_{topic.number:02d}_{slug}.html"
-        html = htmls.get(topic.number, "")
+        topic_html = htmls.get(topic.number, "")
         # Quitar llamadas SCORM
-        html_clean = _strip_scorm_calls(html)
+        html_clean = _strip_scorm_calls(topic_html)
         # Inyectar enlace de vuelta al índice
         nav_back = (
             '<div style="position:fixed;top:1rem;right:1rem;z-index:1000;">'

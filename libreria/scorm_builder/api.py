@@ -11,6 +11,7 @@ NOVEDADES v0.2:
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Optional, List, Dict, Iterable
@@ -24,6 +25,30 @@ from scorm_builder.aiken_builder import build_aiken_file
 from scorm_builder.pdf_builder import build_pdf
 
 logger = logging.getLogger(__name__)
+
+
+# Patrón "Tema N", "Módulo N", "Unidad N", "Capítulo N", "Lección N" al principio
+# de un título, con o sin separador (`.`, `:`, `-`). Usado para limpiar el
+# `topic_title_override` cuando viene del nombre de fichero (modo batch).
+_TOPIC_PREFIX_RE = re.compile(
+    r"^\s*(?:tema|m[oó]dulo|unidad|cap[ií]tulo|lecci[oó]n)\s+\d+\s*[\.\-:·\s]*",
+    re.IGNORECASE,
+)
+
+
+def _strip_topic_prefix(title: str) -> str:
+    """Quita un prefijo redundante "Tema N", "Módulo N", etc. del título.
+
+    El renderer y el pdf_builder ya prefijan automáticamente "Tema N:" delante
+    de `topic.title`. Si el override traído del nombre del fichero incluía ese
+    prefijo, lo eliminamos para no duplicarlo.
+    """
+    if not title:
+        return title
+    cleaned = _TOPIC_PREFIX_RE.sub("", title).strip()
+    # Si tras limpiar queda vacío, mantenemos el original (no queremos perder
+    # toda la info por una limpieza demasiado agresiva).
+    return cleaned or title.strip()
 
 
 def convert_image_tables(course: CourseStructure, images_dir: Path) -> int:
@@ -186,7 +211,9 @@ def build_complete_course(
     one_scorm_per_topic: bool = True,
     extra_resources: Optional[Iterable[str | Path]] = None,
     topic_title_override: Optional[str] = None,
+    topic_number_override: Optional[int] = None,
     strict_wcag: bool = False,
+    detect_tables_in_images: bool = False,
 ) -> BuildResult:
     """Construye un curso completo desde un DOCX.
 
@@ -227,12 +254,18 @@ def build_complete_course(
         except Exception as e:
             logger.warning(f"No se pudo procesar imágenes: {e}")
 
-        # v0.6: detectar imágenes que en realidad son tablas y convertirlas
-        try:
-            from scorm_builder.table_ocr import analyze_image_for_table
-            convert_image_tables(course, Path(course.extracted_images_dir))
-        except Exception as e:
-            logger.warning(f"No se pudo analizar imágenes para detección de tablas: {e}")
+        # v0.6: detección automática de imágenes-que-son-tablas DESACTIVADA por
+        # defecto. El detector (`table_ocr._looks_like_a_table`) tiene un ratio
+        # de falsos positivos muy alto (~70% en docs reales con diagramas,
+        # SmartArt, infografías) y convierte esquemas en "tablas de 1 columna".
+        # Quien quiera la conversión la puede activar con `detect_tables_in_images=True`
+        # o llamar a `convert_image_tables(course, images_dir)` manualmente
+        # tras revisar imagen por imagen.
+        if detect_tables_in_images:
+            try:
+                convert_image_tables(course, Path(course.extracted_images_dir))
+            except Exception as e:
+                logger.warning(f"No se pudo analizar imágenes para detección de tablas: {e}")
 
     if title_override:
         course.metadata.title = title_override
@@ -247,12 +280,34 @@ def build_complete_course(
     # Override del título de los temas (útil para modo lote: el SCORM toma
     # el nombre del fichero como título). Si hay un solo tema, lo reemplaza;
     # si hay varios, antepone el override como prefijo.
+    #
+    # FIX título doble: cuando el override viene del nombre de fichero (ej.
+    # "Tema 1 Mejora ...") y se asigna tal cual a `topic.title`, tanto el PDF
+    # como el SCORM lo prefijan otra vez con "Tema {topic.number}: ", dando
+    # "Tema 1: Tema 1 Mejora ...". Quitamos el prefijo redundante aquí.
     if topic_title_override:
+        clean_override = _strip_topic_prefix(topic_title_override)
         if len(course.topics) == 1:
-            course.topics[0].title = topic_title_override
+            course.topics[0].title = clean_override
         elif len(course.topics) > 1:
             for t in course.topics:
-                t.title = f"{topic_title_override} · {t.title}"
+                t.title = f"{clean_override} · {t.title}"
+
+    # FIX numeración: si el llamador (modo batch desde app_local) sabe el
+    # número real del tema porque viene del nombre del fichero ("Tema 5
+    # X.docx") y NO coincide con el que detectó el parser dentro del docx,
+    # forzamos la alineación. Solo aplica si hay un único tema (modo batch).
+    if topic_number_override is not None and len(course.topics) == 1:
+        try:
+            n = int(topic_number_override)
+            if n > 0 and course.topics[0].number != n:
+                logger.info(
+                    f"Forzando topic.number {course.topics[0].number} → {n} "
+                    "(topic_number_override desde el nombre del fichero)"
+                )
+                course.topics[0].number = n
+        except (TypeError, ValueError):
+            pass
 
     # Sistema de puntuación ponderada: aplicar overrides
     if weight_view_override is not None or weight_quiz_override is not None:
@@ -407,7 +462,10 @@ def build_complete_course(
         for pdf in pdf_files:
             target = final_pdf_dir / pdf.name
             if pdf.exists():
-                pdf.rename(target)
+                # Path.rename falla con OSError("Invalid cross-device link") si
+                # origen y destino están en filesystems distintos (caso común
+                # entre /tmp y la carpeta de usuario). shutil.move funciona.
+                shutil.move(str(pdf), str(target))
                 final_pdfs.append(target)
         # Borrar carpeta temporal de descargas
         if descargas_dir and descargas_dir.exists():
@@ -556,12 +614,32 @@ def rebuild_from_structure(
     )
 
 
+_VIEW_STRATEGIES = ("scroll", "time", "both")
+_HEX_COLOR_RE = __import__("re").compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def _safe_color(value) -> str:
+    """Devuelve un color hex válido o cadena vacía. Evita CSS injection cuando
+    los colores vienen de un dict externo (JSON persistido, API, etc.)."""
+    if not isinstance(value, str):
+        return ""
+    v = value.strip()
+    return v if _HEX_COLOR_RE.match(v) else ""
+
+
 def course_from_dict(data: dict) -> CourseStructure:
-    """Reconstruye una CourseStructure a partir de un dict (deserializa to_dict)."""
+    """Reconstruye una CourseStructure a partir de un dict (deserializa to_dict).
+
+    Saneamos `view_strategy` y los colores aquí porque acaban interpolados
+    directamente en `<script>` y `<style>` del SCORM. Si vinieran sin validar
+    desde un JSON manipulado, sería inyección de JS/CSS.
+    """
     from scorm_builder.parser import (
         CourseStructure, CourseMetadata, Topic, Subsection, Block, BlockType, Question
     )
     md_data = data.get("metadata", {})
+    raw_strategy = md_data.get("view_strategy", "both")
+    safe_strategy = raw_strategy if raw_strategy in _VIEW_STRATEGIES else "both"
     metadata = CourseMetadata(
         title=md_data.get("title", "Curso sin título"),
         subtitle=md_data.get("subtitle", ""),
@@ -572,10 +650,10 @@ def course_from_dict(data: dict) -> CourseStructure:
         weight_view=int(md_data.get("weight_view", 40)),
         weight_quiz=int(md_data.get("weight_quiz", 60)),
         view_min_seconds=int(md_data.get("view_min_seconds", 10)),
-        view_strategy=md_data.get("view_strategy", "both"),
-        color_deep=md_data.get("color_deep", ""),
-        color_primary=md_data.get("color_primary", ""),
-        color_bright=md_data.get("color_bright", ""),
+        view_strategy=safe_strategy,
+        color_deep=_safe_color(md_data.get("color_deep", "")),
+        color_primary=_safe_color(md_data.get("color_primary", "")),
+        color_bright=_safe_color(md_data.get("color_bright", "")),
     )
     course = CourseStructure(metadata=metadata)
     for t_data in data.get("topics", []):

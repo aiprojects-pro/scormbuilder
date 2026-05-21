@@ -1,0 +1,12 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+spec:
+  lookupPolicy:
+    # Permite usar nombres cortos en el Deployment (`image: scormbuilder:latest`)
+    # y que OpenShift los resuelva al ImageStreamTag automáticamente.
+    local: true

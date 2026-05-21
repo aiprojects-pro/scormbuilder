@@ -27,10 +27,26 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
-# Umbrales (ajustables)
-MIN_TABLE_CONFIDENCE = 55   # debajo de este score no se considera tabla
+# Umbrales (ajustables).
+# v0.7: tras observar ~70% de falsos positivos en docs reales (Tema 2 IFS,
+# Tema 1 organización pública), endurecemos los criterios:
+#   - MIN_TABLE_CONFIDENCE 55 → 80: ningún caso "dudoso" pasa
+#   - Eliminado fallback row_strips (1 columna) en `analyze_image_for_table`
+#     porque convertía cualquier infografía / diagrama / esquema con líneas
+#     horizontales en "tabla de 1 columna".
+#   - Exigimos GRID COMPLETO: al menos 2 h-lines internas Y al menos 1
+#     v-line interna real (no fragmentos de borde).
+# El precio: alguna tabla pegada como imagen muy borrosa o muy poco
+# estructurada NO se detecta. Pero ese caso ya era basura tras OCR (el
+# usuario lo describió como "tablas mal transcritas"); preferimos que se
+# vea como imagen.
+MIN_TABLE_CONFIDENCE = 80   # antes 55. No bajar sin tener un dataset etiquetado.
 MIN_LINE_LENGTH_RATIO = 0.30  # una línea válida cubre >= 30% del ancho/alto
 MIN_TEXT_CONFIDENCE = 35    # confianza tesseract mínima por palabra
+# Mínimos estructurales: bajo estos números, ni siquiera intentamos OCR
+MIN_H_LINES = 3              # al menos 3 separadores horizontales internos
+MIN_V_LINES_INTERNAL = 1     # al menos 1 separador vertical interno real
+MIN_COLS_REQUIRED = 2        # tablas de 1 columna ya no se aceptan (eran falsos positivos)
 
 
 @dataclass
@@ -570,74 +586,36 @@ def extract_table_from_image(
         info["h_lines_after_filter"] = len(h_lines)
         result.notes.append(f"h-lines tras filtro de cercanía: {len(h_lines)}")
 
-        # Caso A: grid completo — al menos 1 v_line INTERNA (= 2 columnas)
-        # más h_lines bien separadas. La validación r.n_cols >= 2 al final
-        # nos protege de falsos positivos donde la v_line interna era un
-        # carácter "|" del texto.
-        if len(h_lines) >= 3 and len(v_lines) >= 1:
+        # ÚNICO camino aceptado: grid CLARO (≥ MIN_H_LINES horizontales y
+        # ≥ MIN_V_LINES_INTERNAL verticales internas).
+        # v0.7: eliminamos el fallback `row_strips` (tabla de 1 columna) porque
+        # convertía cualquier infografía / esquema con líneas horizontales en
+        # "tabla" con OCR sobre cajas no-tabulares (texto absurdo en el SCORM).
+        if len(h_lines) >= MIN_H_LINES and len(v_lines) >= MIN_V_LINES_INTERNAL:
             H, W = gray.shape
             v_lines_full = sorted(set([0] + list(v_lines) + [W]))
-            # v0.6.5: añadir bordes superior/inferior a h_lines si hay espacio
-            # suficiente. Esto captura la primera/última fila cuando las
-            # h_lines detectadas son solo separadores internos (caso POSDCORB).
             h_lines_full = sorted(set(h_lines))
             if h_lines_full and h_lines_full[0] > 30:
                 h_lines_full = [0] + h_lines_full
             if h_lines_full and (H - h_lines_full[-1]) > 30:
                 h_lines_full = h_lines_full + [H]
             r = _extract_with_grid(gray, h_lines_full, v_lines_full, pytesseract, lang, result)
-            if r.is_table and r.n_cols >= 2:
+            # Validación final: necesitamos ≥ MIN_COLS_REQUIRED columnas y
+            # confianza ≥ MIN_TABLE_CONFIDENCE (ahora 80).
+            if r.is_table and r.n_cols >= MIN_COLS_REQUIRED:
                 return r
-            # Si no detecta 2+ columnas reales, caer a row_strips
+            result.notes.append(
+                f"Grid detectado pero el extractor no obtuvo ≥{MIN_COLS_REQUIRED} columnas "
+                f"o la confianza fue baja (got n_cols={r.n_cols}, confidence={r.confidence})."
+            )
+            return result
 
-        # Caso B: tabla tipo lista (1 columna) — separadores horizontales
-        # claros pero sin columnas internas.
-        row_strips = _detect_row_strips(gray, cv2, np)
-        row_strips = _valid_separators(row_strips, min_gap=20)
-        result.notes.append(f"row_strips tras filtro: {len(row_strips)}")
-        if len(row_strips) >= 2:
-            # v0.6.5/v0.6.6: validaciones para descartar diagramas que se
-            # detectan falsamente como tablas 1-columna.
-            strips_sorted = sorted(set(row_strips))
-            heights = [strips_sorted[i+1] - strips_sorted[i]
-                       for i in range(len(strips_sorted)-1)]
-            n_rows = len(heights)
-            mean_height = sum(heights) / n_rows if n_rows > 0 else 0
-
-            # (a) Pocas filas con altura grande → diagrama
-            if n_rows < 3 and mean_height > 100:
-                result.notes.append(
-                    f"Descartado row_strips: solo {n_rows} filas con "
-                    f"altura media {mean_height:.0f}px (probable diagrama)"
-                )
-                return result
-
-            # (b) Distinguir diagrama de lista válida:
-            # - Listas reales suelen tener cabeceras CORTAS (filas pequeñas)
-            #   seguidas de contenido más grande.
-            # - Diagramas tienen cajas de tamaño medio-grande, sin filas
-            #   muy pequeñas que actúen como cabeceras.
-            # Si hay >=4 filas Y NINGUNA es pequeña (<35% del promedio) Y
-            # las alturas tienen alta variabilidad (max/mediana > 2.5),
-            # probablemente es un diagrama, no una lista.
-            if n_rows >= 4 and mean_height > 0:
-                small_threshold = 0.35 * mean_height
-                small_rows = sum(1 for h_ in heights if h_ < small_threshold)
-                sorted_h = sorted(heights)
-                median_h = sorted_h[len(sorted_h) // 2]
-                max_h = max(heights)
-                ratio = max_h / median_h if median_h > 0 else 1
-                if small_rows == 0 and ratio > 2.5:
-                    result.notes.append(
-                        f"Descartado row_strips: {n_rows} filas sin cabeceras "
-                        f"cortas y altura variable (max/mediana={ratio:.1f}, "
-                        f"probable diagrama)"
-                    )
-                    return result
-            return _extract_row_strips(gray, row_strips, pytesseract, lang, result)
-
-        # Caso C: la imagen no parece una tabla
-        result.notes.append("No se detectó estructura de tabla suficiente.")
+        # Sin grid claro → NO es tabla. No intentamos fallbacks débiles.
+        result.notes.append(
+            f"No se detectó estructura de tabla suficiente "
+            f"(h_lines={len(h_lines)}, v_lines internas={len(v_lines)}; "
+            f"se exige ≥{MIN_H_LINES} y ≥{MIN_V_LINES_INTERNAL})."
+        )
         return result
 
     except Exception as e:

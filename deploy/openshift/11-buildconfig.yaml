@@ -1,0 +1,38 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+spec:
+  # Build binario: subes el contexto desde tu máquina con `oc start-build
+  # scormbuilder --from-dir=. --follow`. Es lo más simple para SNO y no depende
+  # de un git remoto accesible desde el cluster.
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: deploy/Containerfile
+      # forcePull asegura que tira UBI fresh cada build (las CVEs cambian rápido).
+      forcePull: true
+  output:
+    to:
+      kind: ImageStreamTag
+      name: scormbuilder:latest
+  # Triggers desactivados — los builds se disparan manualmente con `oc start-build`.
+  triggers: []
+  # Sin push pull secrets aquí: el registry interno autentica con el ServiceAccount.
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  # Builds antiguos a recoger: mantenemos los últimos 5 OK y 2 fallidos para
+  # diagnóstico, el resto se purga.
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 2

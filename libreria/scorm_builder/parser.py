@@ -16,6 +16,7 @@ import re
 import logging
 import tempfile
 import unicodedata
+import zipfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -511,23 +512,81 @@ def _extract_table_rows_html(table, doc, extractor) -> tuple[List[List[str]], Li
     return rows_html, extras_collected
 
 
+_W_NS_MAIN = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _numbering_format_for(p) -> Optional[str]:
+    """Inspecciona el `numbering.xml` del docx para saber si una lista usa
+    `numFmt="bullet"` o un formato numérico.
+
+    Devuelve "bullet" / "decimal" / "lowerLetter" / ... o None si no se puede
+    determinar. Esto sustituye el "asumimos bullets" anterior, que hacía que
+    todas las listas numeradas se renderizaran como `<ul>`.
+    """
+    try:
+        pPr = p._p.find(f"{_W_NS_MAIN}pPr")
+        if pPr is None:
+            return None
+        numPr = pPr.find(f"{_W_NS_MAIN}numPr")
+        if numPr is None:
+            return None
+        numId_el = numPr.find(f"{_W_NS_MAIN}numId")
+        ilvl_el = numPr.find(f"{_W_NS_MAIN}ilvl")
+        if numId_el is None:
+            return None
+        num_id = numId_el.get(f"{_W_NS_MAIN}val")
+        ilvl = ilvl_el.get(f"{_W_NS_MAIN}val") if ilvl_el is not None else "0"
+
+        # Acceder a la parte de numbering del documento
+        doc = p.part.document
+        numbering_part = getattr(doc.part, "numbering_part", None)
+        if numbering_part is None:
+            return None
+        numbering_el = numbering_part.element
+
+        # num → abstractNumId
+        num_el = numbering_el.find(f"{_W_NS_MAIN}num[@{_W_NS_MAIN}numId='{num_id}']")
+        if num_el is None:
+            return None
+        absNumId_el = num_el.find(f"{_W_NS_MAIN}abstractNumId")
+        if absNumId_el is None:
+            return None
+        abs_id = absNumId_el.get(f"{_W_NS_MAIN}val")
+
+        # abstractNum → lvl → numFmt
+        abs_num = numbering_el.find(
+            f"{_W_NS_MAIN}abstractNum[@{_W_NS_MAIN}abstractNumId='{abs_id}']"
+        )
+        if abs_num is None:
+            return None
+        for lvl in abs_num.findall(f"{_W_NS_MAIN}lvl"):
+            if lvl.get(f"{_W_NS_MAIN}ilvl") == ilvl:
+                numFmt = lvl.find(f"{_W_NS_MAIN}numFmt")
+                if numFmt is not None:
+                    return numFmt.get(f"{_W_NS_MAIN}val")
+                break
+    except Exception:
+        return None
+    return None
+
+
 def _is_list_paragraph(p) -> Optional[BlockType]:
-    """Detecta si un párrafo es de lista y de qué tipo."""
+    """Detecta si un párrafo es de lista y de qué tipo (bullet o numerada)."""
     style_name = _safe_style_name(p)
     if style_name.startswith("List Bullet"):
         return BlockType.LIST_BULLET
     if style_name.startswith("List Number"):
         return BlockType.LIST_NUMBER
-    # Detección por numId del XML (más fiable)
-    try:
-        pPr = p._p.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr")
-        if pPr is not None:
-            numPr = pPr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numPr")
-            if numPr is not None:
-                return BlockType.LIST_BULLET  # asumimos bullets si no podemos saber el tipo
-    except Exception:
-        pass
-    return None
+    # Detección por numId del XML, ahora consultando el numFmt real del
+    # `numbering.xml` para distinguir bullet vs numerada.
+    fmt = _numbering_format_for(p)
+    if fmt is None:
+        return None
+    if fmt == "bullet":
+        return BlockType.LIST_BULLET
+    # Cualquier otro formato (decimal, lowerLetter, upperRoman, etc.) es lista
+    # ordenada.
+    return BlockType.LIST_NUMBER
 
 
 def _build_media_block(callout_type: BlockType, clean_text: str) -> Optional[Block]:
@@ -557,6 +616,61 @@ def _build_media_block(callout_type: BlockType, clean_text: str) -> Optional[Blo
     )
 
 
+# ---- Anti zip-bomb del DOCX ----
+# Un .docx es un ZIP. Si no validamos, python-docx descomprime felizmente
+# entradas de 10 GB en RAM y "logic bombs" con miles de relaciones que
+# disparan O(N²) en otros módulos. Aquí imponemos límites razonables para
+# trabajo real (incluso docs muy ilustrados rara vez pasan de 50 MB
+# descomprimidos y 200 entradas).
+MAX_DOCX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024   # 250 MB
+MAX_DOCX_ENTRIES = 1000
+MAX_DOCX_COMPRESSION_RATIO = 100                  # x100 ya es muy generoso
+
+
+class DocxSafetyError(ValueError):
+    """El DOCX excede los límites de seguridad (posible zip-bomb)."""
+
+
+def _validate_docx_safety(path: Path) -> None:
+    """Inspecciona el ZIP del .docx y aborta si excede los límites.
+
+    No descomprime los datos: solo lee la cabecera (`infolist()`), que
+    confía en los metadatos del ZIP. Es una primera barrera defensiva; los
+    límites por imagen siguen aplicándose en `inline.ImageExtractor`.
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile as e:
+        raise DocxSafetyError(f"No es un DOCX válido (zip mal formado): {e}")
+    if len(infos) > MAX_DOCX_ENTRIES:
+        raise DocxSafetyError(
+            f"El DOCX contiene {len(infos)} entradas; máximo permitido: "
+            f"{MAX_DOCX_ENTRIES}. Posible zip-bomb."
+        )
+    total_uncompressed = 0
+    for info in infos:
+        if info.file_size > MAX_DOCX_UNCOMPRESSED_BYTES:
+            raise DocxSafetyError(
+                f"Entrada '{info.filename}' descomprime a {info.file_size} bytes, "
+                f"máximo permitido por entrada: {MAX_DOCX_UNCOMPRESSED_BYTES}."
+            )
+        if info.compress_size > 0:
+            ratio = info.file_size / info.compress_size
+            if ratio > MAX_DOCX_COMPRESSION_RATIO:
+                raise DocxSafetyError(
+                    f"Entrada '{info.filename}' tiene ratio de compresión "
+                    f"{ratio:.0f}× (máximo seguro: {MAX_DOCX_COMPRESSION_RATIO}×). "
+                    "Posible zip-bomb."
+                )
+        total_uncompressed += info.file_size
+        if total_uncompressed > MAX_DOCX_UNCOMPRESSED_BYTES:
+            raise DocxSafetyError(
+                f"El DOCX descomprime a más de {MAX_DOCX_UNCOMPRESSED_BYTES} "
+                f"bytes en total. Posible zip-bomb."
+            )
+
+
 def parse_docx(
     path: str | Path,
     default_palette: str = "azul",
@@ -576,6 +690,12 @@ def parse_docx(
     if not path.exists():
         raise FileNotFoundError(f"Archivo no encontrado: {path}")
 
+    # SEC: validación anti zip-bomb del .docx. python-docx no impone límites
+    # sobre el tamaño descomprimido ni sobre el número de entradas; un docx
+    # malicioso puede llenar RAM/disco al ser parseado. Inspeccionamos el
+    # contenido del zip ANTES de abrirlo con Document().
+    _validate_docx_safety(path)
+
     doc = Document(str(path))
 
     course = CourseStructure(metadata=CourseMetadata(palette=default_palette))
@@ -589,22 +709,27 @@ def parse_docx(
     extractor = ImageExtractor(doc, images_dir)
     course.extracted_images_dir = str(images_dir)
 
-    # Iterar todos los bloques del cuerpo (párrafos + tablas en orden)
+    # Iterar todos los bloques del cuerpo (párrafos + tablas en orden).
+    # PERF: antes se hacía búsqueda lineal (O(N) por elemento → O(N²) total)
+    # de cada child contra `doc.paragraphs` y `doc.tables`. Indexamos una sola
+    # vez por id() del elemento XML subyacente para resolver en O(1).
+    _p_by_id = {id(p._p): p for p in doc.paragraphs}
+    _tbl_by_id = {id(t._tbl): t for t in doc.tables}
     body_elements = []
     for child in doc.element.body.iterchildren():
         tag = child.tag.split("}")[-1]
         if tag == "p":
-            for p in doc.paragraphs:
-                if p._p == child:
-                    body_elements.append(("p", p))
-                    break
+            p_obj = _p_by_id.get(id(child))
+            if p_obj is not None:
+                body_elements.append(("p", p_obj))
         elif tag == "tbl":
-            for t in doc.tables:
-                if t._tbl == child:
-                    body_elements.append(("tbl", t))
-                    break
+            t_obj = _tbl_by_id.get(id(child))
+            if t_obj is not None:
+                body_elements.append(("tbl", t_obj))
 
     paragraphs = [el[1] for el in body_elements if el[0] == "p"]
+    # Índice paragraph→posición para reemplazar el `.index()` lineal de más abajo.
+    _paragraph_pos = {id(p): i for i, p in enumerate(paragraphs)}
 
     # Procesar metadatos al inicio (si los hay)
     skip_until = _detect_metadata(paragraphs, course)
@@ -677,17 +802,23 @@ def parse_docx(
     def flush_intro():
         nonlocal intro_buffer
         if intro_buffer and current_topic:
-            current_topic.intro = " ".join(intro_buffer).strip()
+            # Preservar la separación de párrafos del DOCX original. Antes se
+            # usaba " ".join → varios párrafos quedaban como un único bloque
+            # corrido. El renderer respeta saltos dobles para separar.
+            current_topic.intro = "\n\n".join(s.strip() for s in intro_buffer if s.strip())
             intro_buffer = []
 
     for kind, el in body_elements:
-        # Saltar bloque de metadatos inicial
+        # Saltar bloque de metadatos inicial.
+        # PERF: antes `paragraphs.index(el)` era lineal (O(N) por iteración →
+        # O(N²) en documentos largos). Resolución O(1) por id.
+        # BUG sutil corregido de paso: el `except ValueError: pass` antiguo
+        # dejaba `p_index` con el valor de la iteración anterior, lo que podía
+        # saltar/no saltar bloques erráticamente. Con default explícito a -1
+        # nunca usamos un valor obsoleto.
         if kind == "p":
-            try:
-                p_index = paragraphs.index(el)
-            except ValueError:
-                pass
-            if p_index < skip_until:
+            p_index = _paragraph_pos.get(id(el), -1)
+            if 0 <= p_index < skip_until:
                 continue
 
         if kind == "tbl":
@@ -718,8 +849,17 @@ def parse_docx(
         # estilo Heading 2 mal puesto (caso de docx extraídos de PDF).
         # Detección de h2: estilo Heading 2, patrón N.M., o ser un encabezado de quiz
         # corto como "Quiz", "Test", "Evaluación" en línea suelta.
+        # FIX: antes esta heurística disparaba sobre cualquier párrafo de 1-4
+        # palabras que mencionara "test"/"quiz" (p.ej. "Test de personalidad")
+        # creando subapartados fantasma. Ahora exigimos además que el párrafo
+        # tenga estilo de heading (no Normal): no convertimos contenido del
+        # cuerpo en quiz por mencionar la palabra.
+        _is_heading_styled = style_name.startswith("Heading")
         is_quiz_kw_line = (
-            not is_h1 and 1 <= len(text.split()) <= 4 and _is_quiz_heading(text)
+            not is_h1
+            and _is_heading_styled
+            and 1 <= len(text.split()) <= 4
+            and _is_quiz_heading(text)
         )
         is_h2 = (
             (style_name.startswith("Heading 2") or _looks_like_heading2(text) or is_quiz_kw_line)
@@ -745,6 +885,17 @@ def parse_docx(
                 topic_number = int(number_match.group(2))
             else:
                 topic_number = len(course.topics) + 1
+            # Si ya existe un tema con el mismo número (docx con dos H1 "Tema 2"),
+            # reasignamos al siguiente disponible y avisamos. Antes esto producía
+            # IDs SCORM colisionantes y archivos con el mismo nombre.
+            existing_numbers = {t.number for t in course.topics}
+            if topic_number in existing_numbers:
+                new_number = max(existing_numbers) + 1
+                course.warnings.append(
+                    f"Tema {topic_number} duplicado en el documento; "
+                    f"reasignado como Tema {new_number} para evitar colisiones."
+                )
+                topic_number = new_number
             # Limpiar título: quitar "Tema N.", "Módulo N.", etc.
             title_clean = re.sub(
                 r"^\s*(tema|módulo|modulo|unidad|capítulo|capitulo|lección|leccion)\s+\d+[\.\s\-:]\s*",
@@ -780,7 +931,10 @@ def parse_docx(
             sub_number = f"{current_topic.number}.{len(current_topic.subsections) + 1}"
             # Limpiar el número del título si lo lleva
             title_clean = re.sub(r"^\s*\d+\.\d+\.?\s*", "", text).strip()
-            sub_id = f"l{len(current_topic.subsections) + 1}"
+            # sub_id prefijado con el nº de tema para evitar colisiones entre
+            # temas (inline_quiz se keyed por sub_id; antes "l1" del tema 1 y
+            # "l1" del tema 2 se mezclaban).
+            sub_id = f"t{current_topic.number}_l{len(current_topic.subsections) + 1}"
             current_subsection = Subsection(
                 id=sub_id,
                 number=sub_number,

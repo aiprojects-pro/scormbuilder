@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scormbuilder-data
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+spec:
+  # LVMS en SNO solo soporta ReadWriteOnce (un único pod monta). Coherente con
+  # nuestro Deployment de 1 réplica.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # Nombre por defecto del StorageClass creado por LVMS Operator. Confírmalo
+  # con `oc get sc` antes de aplicar.
+  storageClassName: lvms-vg1
+  # VolumeMode block no es lo que queremos (querríamos un FS montable).
+  volumeMode: Filesystem

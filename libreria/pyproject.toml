@@ -61,4 +61,9 @@ scorm-builder = "scorm_builder.cli:main"
 include-package-data = true
 
 [tool.setuptools.package-data]
-scorm_builder = ["templates/*.html", "templates/*.css", "templates/*.js", "assets/*"]
+scorm_builder = [
+    "templates/*.html", "templates/*.css", "templates/*.js",
+    "assets/*",
+    "assets/css/*.css",
+    "assets/js/*.js",
+]

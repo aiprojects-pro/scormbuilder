@@ -1,0 +1,42 @@
+# ServiceMonitor para OpenShift User Workload Monitoring (UWM).
+#
+# REQUISITO PREVIO: el cluster-admin debe habilitar UWM con:
+#
+#   apiVersion: v1
+#   kind: ConfigMap
+#   metadata:
+#     name: cluster-monitoring-config
+#     namespace: openshift-monitoring
+#   data:
+#     config.yaml: |
+#       enableUserWorkload: true
+#
+# Hasta que UWM esté habilitado, este recurso se queda inerte (no rompe nada
+# pero tampoco scrapea). Ver deploy/RECOMENDACIONES_ADMIN.md.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    # Label requerido por algunos clusters UWM para descubrir ServiceMonitors
+    k8s-app: scormbuilder
+spec:
+  namespaceSelector:
+    matchNames:
+      - scormbuilder
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scormbuilder
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      # honorLabels=false porque el endpoint no tiene labels propios y queremos
+      # que Prometheus añada los suyos (namespace, pod, service).
+      honorLabels: false
+      # Sin autenticación: el endpoint /metrics no requiere login porque la
+      # NetworkPolicy ya limita quién puede llegar a él.

@@ -42,6 +42,31 @@ URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Esquemas permitidos en hipervínculos del DOCX. Se aplica una whitelist estricta
+# para evitar XSS vía javascript:, data:, vbscript: y similares incrustados en
+# enlaces del Word del usuario.
+_SAFE_LINK_SCHEMES = ("http://", "https://", "mailto:", "tel:")
+
+
+def _is_safe_link(url: str) -> bool:
+    """Devuelve True si la URL tiene un esquema seguro para `<a href>`.
+
+    Rechaza javascript:, data:, vbscript:, file:, etc. URLs relativas (sin
+    esquema) se aceptan: ya no pueden ejecutar JS.
+    """
+    if not url:
+        return False
+    u = url.strip().lower()
+    if not u:
+        return False
+    # Ancla interna #foo: se permite (no es navegación cross-protocol)
+    if u.startswith("#"):
+        return True
+    # Sin esquema: relativo, se permite
+    if "://" not in u and ":" not in u.split("/", 1)[0]:
+        return True
+    return any(u.startswith(s) for s in _SAFE_LINK_SCHEMES)
+
 
 # ============================================================
 # MODELO DE BLOQUES "EXTRA" EMITIDOS DESDE UN PÁRRAFO
@@ -75,11 +100,27 @@ def is_video_url(url: str) -> bool:
 # EXTRACTOR DE IMÁGENES INCRUSTADAS
 # ============================================================
 
+# Whitelist de extensiones de imagen permitidas. El partname del docx no es
+# de confianza: un atacante podría declarar una "imagen" con extensión .html
+# o .exe; con whitelist forzamos un mapeo determinista a una extensión segura.
+_ALLOWED_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "tif", "tiff"}
+
+# Límites anti zip-bomb / DoS por disco. Conservadores: el caso real más
+# pesado son fotos a 4K (~5-8 MB). Más allá de eso, casi seguro es abuso.
+MAX_IMAGE_BYTES = 15 * 1024 * 1024            # 15 MB por imagen
+MAX_TOTAL_IMAGE_BYTES = 150 * 1024 * 1024     # 150 MB total acumulado
+MAX_IMAGE_COUNT = 500                          # nº máximo de imágenes
+
+
 class ImageExtractor:
     """Extrae imágenes incrustadas de un DOCX a una carpeta destino.
 
     Mantiene un diccionario rId→ruta para reutilizar imágenes referenciadas
     varias veces y evitar colisiones de nombres.
+
+    SEC: aplica whitelist de extensiones y caps de tamaño (individuales y
+    acumulados) para protegerse de docx maliciosos que intenten llenar disco
+    o escribir archivos con extensiones peligrosas.
     """
 
     def __init__(self, doc, target_dir: Path):
@@ -88,12 +129,15 @@ class ImageExtractor:
         self.target_dir.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, str] = {}  # rId → filename (sin carpeta)
         self._counter = 0
+        self._total_bytes = 0
+        self._warned_limit = False
 
     def extract_by_rid(self, rid: str) -> Optional[str]:
         """Extrae la imagen referenciada por rId y devuelve el nombre de fichero.
 
         Si la imagen ya se extrajo antes, devuelve el nombre cacheado.
-        Devuelve None si rId no apunta a una imagen válida.
+        Devuelve None si rId no apunta a una imagen válida, si excede los
+        límites de tamaño o si la extensión no está en la whitelist.
         """
         if rid in self._cache:
             return self._cache[rid]
@@ -104,6 +148,17 @@ class ImageExtractor:
             return None
         if "image" not in rel.reltype.lower():
             return None
+
+        # Cap de cantidad antes de leer
+        if self._counter >= MAX_IMAGE_COUNT:
+            if not self._warned_limit:
+                logger.warning(
+                    f"Se ha superado el máximo de {MAX_IMAGE_COUNT} imágenes; "
+                    "el resto se ignorará."
+                )
+                self._warned_limit = True
+            return None
+
         try:
             image_part = rel.target_part
             blob = image_part.blob
@@ -111,7 +166,24 @@ class ImageExtractor:
             logger.warning(f"No se pudo leer la imagen {rid}: {e}")
             return None
 
-        # Determinar extensión a partir del content_type o de la URL original
+        # Cap por imagen
+        if len(blob) > MAX_IMAGE_BYTES:
+            logger.warning(
+                f"Imagen {rid} descartada: {len(blob)} bytes excede el máximo "
+                f"de {MAX_IMAGE_BYTES} bytes."
+            )
+            return None
+        # Cap acumulado
+        if self._total_bytes + len(blob) > MAX_TOTAL_IMAGE_BYTES:
+            if not self._warned_limit:
+                logger.warning(
+                    f"Se ha superado el tamaño total máximo de imágenes "
+                    f"({MAX_TOTAL_IMAGE_BYTES} bytes); el resto se ignorará."
+                )
+                self._warned_limit = True
+            return None
+
+        # Determinar extensión a partir del content_type
         ct = (image_part.content_type or "").lower()
         ext_map = {
             "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg",
@@ -120,11 +192,14 @@ class ImageExtractor:
         }
         ext = ext_map.get(ct)
         if not ext:
-            # Intentar deducir del partname (ej. /word/media/image3.png)
+            # Fallback: deducir del partname (ej. /word/media/image3.png).
+            # Whitelist: si la extensión no es una imagen reconocida, caemos a "png".
             partname = getattr(image_part, "partname", "")
-            ext = Path(str(partname)).suffix.lstrip(".") or "png"
+            raw_ext = Path(str(partname)).suffix.lstrip(".").lower()
+            ext = raw_ext if raw_ext in _ALLOWED_IMAGE_EXTS else "png"
 
         self._counter += 1
+        self._total_bytes += len(blob)
         filename = f"docx_img_{self._counter:03d}.{ext}"
 
         out_path = self.target_dir / filename
@@ -175,7 +250,12 @@ def _autolink(text_html: str) -> str:
         def _wrap(m: re.Match) -> str:
             url = m.group(0)
             href = url if url.startswith(("http://", "https://")) else f"https://{url}"
-            return f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener">{url}</a>'
+            if not _is_safe_link(href):
+                return html.escape(url, quote=False)
+            return (
+                f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener">'
+                f'{html.escape(url, quote=False)}</a>'
+            )
 
         out.append(URL_RE.sub(_wrap, part))
     return "".join(out)
@@ -420,10 +500,16 @@ def process_paragraph_inline(
                 continue
 
             if url and inner_html:
-                safe_url = html.escape(url, quote=True)
-                html_parts.append(
-                    f'<a href="{safe_url}" target="_blank" rel="noopener">{inner_html}</a>'
-                )
+                if _is_safe_link(url):
+                    safe_url = html.escape(url, quote=True)
+                    html_parts.append(
+                        f'<a href="{safe_url}" target="_blank" rel="noopener">{inner_html}</a>'
+                    )
+                else:
+                    # Esquema no seguro (p.ej. javascript:): mantenemos el texto
+                    # pero descartamos el href. Loguear para diagnóstico.
+                    logger.warning(f"Hipervínculo del DOCX descartado por esquema no seguro: {url[:80]}")
+                    html_parts.append(inner_html)
             elif inner_html:
                 html_parts.append(inner_html)
 

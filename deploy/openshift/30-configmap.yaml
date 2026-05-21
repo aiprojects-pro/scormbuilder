@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scormbuilder-config
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+data:
+  # Variables no-secretas. SCORM_BUILDER_WORK_DIR ya está en la imagen (=/data)
+  # pero lo repetimos aquí por claridad y para sobrescribirlo sin reconstruir.
+  SCORM_BUILDER_WORK_DIR: "/data"
+  # Gunicorn — siempre 1 worker (ver comentarios en gunicorn.conf.py).
+  GUNICORN_WORKERS: "1"
+  GUNICORN_THREADS: "8"
+  GUNICORN_TIMEOUT: "600"
+  GUNICORN_LOG_LEVEL: "info"
+  # PORT que gunicorn bindea (8080 = puerto seguro en containers non-root).
+  PORT: "8080"
+  # Locale para acentos correctos en logs/PDF.
+  LANG: "es_ES.UTF-8"
+  PYTHONUNBUFFERED: "1"

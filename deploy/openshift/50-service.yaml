@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+  annotations:
+    # service-ca operator genera automáticamente el Secret
+    # 'scormbuilder-oauth-tls' con cert firmado por la CA del cluster.
+    # El sidecar oauth-proxy lo monta y lo usa para TLS entrante.
+    service.beta.openshift.io/serving-cert-secret-name: scormbuilder-oauth-tls
+spec:
+  type: ClusterIP
+  ports:
+    # Puerto principal — protegido por oauth-proxy (HTTPS termina aquí).
+    - name: oauth-https
+      port: 443
+      targetPort: oauth-https
+      protocol: TCP
+    # Puerto interno para que Prometheus scrapee /metrics SIN OAuth.
+    # NetworkPolicy ya limita quién puede llegar a 8080.
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: web

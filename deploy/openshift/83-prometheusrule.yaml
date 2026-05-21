@@ -1,0 +1,268 @@
+# PrometheusRule para SCORM Builder — alertas operativas.
+#
+# Se evalúa por el Prometheus de User Workload Monitoring. Requiere UWM
+# habilitado (ver deploy/RECOMENDACIONES_ADMIN.md).
+#
+# Severidades:
+#   - critical: requiere acción inmediata (app caída, datos comprometidos)
+#   - warning : revisar en horas de oficina (capacidad, jobs colgados)
+#   - info    : tendencias, no urgente
+#
+# Cada alerta lleva un `runbook` (URL ficticia que debes adaptar) y un
+# `description` con info accionable. Los `for:` están calibrados para no
+# generar ruido por flaps cortos.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    # Label requerido por UWM en OpenShift para reconocer las reglas:
+    openshift.io/cluster-monitoring: "false"
+    role: alert-rules
+spec:
+  groups:
+    # ============================================================
+    # Disponibilidad
+    # ============================================================
+    - name: scormbuilder.availability
+      interval: 30s
+      rules:
+        - alert: ScormBuilderDown
+          expr: |
+            up{namespace="scormbuilder",service="scormbuilder"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: scormbuilder
+          annotations:
+            summary: "SCORM Builder no responde a Prometheus scrape"
+            description: |
+              El pod del Deployment 'scormbuilder' no responde a /metrics
+              durante más de 2 minutos. Verifica `oc -n scormbuilder get pods`
+              y los logs.
+            runbook_url: "https://example.com/runbooks/scormbuilder-down"
+
+        - alert: ScormBuilderReadinessFailing
+          expr: |
+            kube_pod_status_ready{namespace="scormbuilder",condition="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            service: scormbuilder
+          annotations:
+            summary: "El pod de SCORM Builder no pasa la readiness probe"
+            description: |
+              /readyz devuelve 503 por >5 min. Causa habitual:
+                · PVC no montado o sin permisos de escritura.
+                · DB SQLite bloqueada (otra escritura larga).
+              Ejecutar: `oc -n scormbuilder rsh deployment/scormbuilder ls -la /data`
+
+    # ============================================================
+    # Capacidad / almacenamiento
+    # ============================================================
+    - name: scormbuilder.storage
+      interval: 1m
+      rules:
+        - alert: ScormBuilderPVCAlmostFull
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-data"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-data"}
+            ) > 0.85
+          for: 15m
+          labels:
+            severity: warning
+            service: scormbuilder
+          annotations:
+            summary: "PVC de datos al 85%"
+            description: |
+              El PVC scormbuilder-data está al {{ $value | humanizePercentage }}.
+              Considera ampliarlo (LVMS soporta expansión online):
+              `oc -n scormbuilder patch pvc scormbuilder-data --type merge \
+                 -p '{"spec":{"resources":{"requests":{"storage":"150Gi"}}}}'`
+            runbook_url: "https://example.com/runbooks/scormbuilder-pvc-full"
+
+        - alert: ScormBuilderPVCCritical
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-data"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-data"}
+            ) > 0.95
+          for: 5m
+          labels:
+            severity: critical
+            service: scormbuilder
+          annotations:
+            summary: "PVC de datos al 95% — riesgo de bloqueo de escritura"
+            description: |
+              El PVC está al {{ $value | humanizePercentage }}. Si llega a 100%,
+              los uploads y generación SCORM fallarán. Ampliar YA o liberar
+              cursos antiguos.
+
+        - alert: ScormBuilderBackupPVCFull
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-backups"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace="scormbuilder",persistentvolumeclaim="scormbuilder-backups"}
+            ) > 0.85
+          for: 1h
+          labels:
+            severity: warning
+            service: scormbuilder
+            component: backup
+          annotations:
+            summary: "PVC de backups al 85%"
+            description: |
+              El PVC de backups está al {{ $value | humanizePercentage }}.
+              Reduce RETENTION_DAYS en el CronJob o amplía el PVC.
+
+        - alert: ScormBuilderDataGrowsFast
+          expr: |
+            delta(scormbuilder_data_dir_bytes[24h]) > 5e9
+          for: 30m
+          labels:
+            severity: info
+            service: scormbuilder
+          annotations:
+            summary: "Crecimiento del PVC de datos > 5 GB en 24 h"
+            description: |
+              El PVC de datos ha crecido {{ $value | humanize1024 }}B en 24 h.
+              Verifica que los uploads son legítimos (no abuso de un usuario).
+
+    # ============================================================
+    # Backups
+    # ============================================================
+    - name: scormbuilder.backups
+      interval: 5m
+      rules:
+        - alert: ScormBuilderBackupOverdue
+          expr: |
+            time() - max(kube_cronjob_status_last_successful_time{
+              namespace="scormbuilder", cronjob="scormbuilder-backup"
+            }) > 90000
+          for: 10m
+          labels:
+            severity: warning
+            service: scormbuilder
+            component: backup
+          annotations:
+            summary: "Backup diario no se ha ejecutado con éxito en >25 h"
+            description: |
+              El último backup OK fue hace
+              {{ $value | humanizeDuration }}. Revisa logs:
+              `oc -n scormbuilder logs -l app.kubernetes.io/component=backup --tail=200`
+
+        - alert: ScormBuilderBackupFailing
+          expr: |
+            kube_job_failed{namespace="scormbuilder", job_name=~"scormbuilder-backup-.*"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: scormbuilder
+            component: backup
+          annotations:
+            summary: "Un Job de backup ha terminado en estado Failed"
+            description: |
+              Revisa logs:
+              `oc -n scormbuilder logs job/{{ $labels.job_name }}`
+
+    # ============================================================
+    # Aplicación (métricas custom)
+    # ============================================================
+    - name: scormbuilder.application
+      interval: 1m
+      rules:
+        - alert: ScormBuilderManyActiveJobs
+          expr: scormbuilder_jobs_active > 5
+          for: 1h
+          labels:
+            severity: info
+            service: scormbuilder
+          annotations:
+            summary: "Más de 5 jobs activos durante >1 h"
+            description: |
+              Hay {{ $value }} jobs en estado 'running' durante >1 h.
+              Pueden ser jobs colgados (el worker murió sin actualizar el
+              estado a 'done' o 'error'). Revisar:
+              `oc -n scormbuilder rsh deployment/scormbuilder \
+                  sqlite3 /data/scormbuilder.sqlite3 \
+                  "SELECT jid,kind,state,updated_at FROM jobs WHERE state='running'"`
+
+        - alert: ScormBuilderHighErrorRate
+          expr: |
+            rate(scormbuilder_ai_calls_total{outcome="error"}[10m])
+            /
+            rate(scormbuilder_ai_calls_total[10m]) > 0.3
+          for: 15m
+          labels:
+            severity: warning
+            service: scormbuilder
+          annotations:
+            summary: "Tasa de errores en llamadas a IA > 30%"
+            description: |
+              Más del 30% de las llamadas a Anthropic están fallando.
+              Comprueba: validez de ANTHROPIC_API_KEY, cuota,
+              conectividad de salida (NetworkPolicy egress).
+
+    # ============================================================
+    # Recursos del pod
+    # ============================================================
+    - name: scormbuilder.resources
+      interval: 1m
+      rules:
+        - alert: ScormBuilderMemoryHigh
+          expr: |
+            container_memory_working_set_bytes{
+              namespace="scormbuilder", container="web"
+            }
+            /
+            kube_pod_container_resource_limits{
+              namespace="scormbuilder", container="web", resource="memory"
+            } > 0.85
+          for: 15m
+          labels:
+            severity: warning
+            service: scormbuilder
+          annotations:
+            summary: "Uso de memoria del pod > 85% del límite"
+            description: |
+              El pod está usando {{ $value | humanizePercentage }} del límite
+              de memoria. Si llega al 100% será OOMKilled. Considera subir
+              `resources.limits.memory` en el Deployment o investigar la fuga.
+
+        - alert: ScormBuilderCPUHigh
+          expr: |
+            rate(container_cpu_usage_seconds_total{
+              namespace="scormbuilder", container="web"
+            }[5m]) > 3.5
+          for: 30m
+          labels:
+            severity: info
+            service: scormbuilder
+          annotations:
+            summary: "Uso de CPU sostenido > 3.5 cores"
+            description: |
+              El pod está consumiendo {{ $value }} cores durante >30 min.
+              Casi al límite (4). Investigar qué endpoint está saturando.
+
+        - alert: ScormBuilderPodRestarting
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace="scormbuilder", container="web"
+            }[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: scormbuilder
+          annotations:
+            summary: "El pod se está reiniciando repetidamente"
+            description: |
+              {{ $value }} reinicios por segundo en los últimos 15 min.
+              Revisa logs del pod anterior:
+              `oc -n scormbuilder logs deployment/scormbuilder --previous`

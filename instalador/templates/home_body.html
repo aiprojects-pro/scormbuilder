@@ -1,0 +1,1117 @@
+
+<form id="form">
+
+  <!-- Bloque 0: Cabecera del curso (UBICACIÓN PROMINENTE) -->
+  <div class="card card-hero">
+    <h2 style="margin-bottom:0.3rem;">Crear un nuevo curso</h2>
+    <p style="color:var(--ink-mute); font-size:0.95rem; margin-bottom:1.4rem;">
+      Rellena los datos del curso. Luego eliges los archivos Word, la versión de SCORM y los extras.
+    </p>
+    <div class="row">
+      <div class="field" style="flex:2;">
+        <label for="titulo">Título del curso *</label>
+        <input type="text" id="titulo" name="titulo" placeholder="P. ej. Gestor Deportivo · Bloque 1" required>
+        <span class="hint">Aparece en la cabecera del paquete y en el LMS.</span>
+      </div>
+      <div class="field">
+        <label for="num_hours">Duración (horas)</label>
+        <input type="number" id="num_hours" name="num_hours" value="20" min="1" max="999" step="0.5">
+        <span class="hint">Total estimado de horas del curso.</span>
+      </div>
+      <div class="field">
+        <label for="autor">Autor / entidad</label>
+        <input type="text" id="autor" name="autor" placeholder="Tu nombre o asociación">
+      </div>
+    </div>
+  </div>
+
+  <!-- Bloque 1: Modo de subida -->
+  <div class="card">
+    <h2><span class="num">1</span> ¿Cómo subes el contenido?</h2>
+    <div class="radio-cards" data-name="upload_mode">
+      <label class="radio-card selected" data-value="single">
+        <input type="radio" name="upload_mode" value="single" checked>
+        <div class="rc-title">📄 Un único archivo Word</div>
+        <div class="rc-desc">Subes un .docx y se genera <strong>un paquete SCORM</strong>.
+          Recomendado para cursos cortos o cuando todo el contenido cabe en un solo documento.</div>
+      </label>
+      <label class="radio-card" data-value="batch">
+        <input type="radio" name="upload_mode" value="batch">
+        <div class="rc-title">📚 Varios archivos (lote)</div>
+        <div class="rc-desc">Subes varios .docx a la vez. Se genera <strong>un SCORM por archivo</strong>,
+          usando el nombre del fichero como título del paquete. Ideal para temarios largos
+          con un tema por unidad.</div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Bloque 2: Documento(s) Word -->
+  <div class="card">
+    <h2><span class="num">2</span> Sube tus documentos Word</h2>
+    <div class="upload-zone" id="docxZone">
+      <div class="icon">📄</div>
+      <div class="text" id="docxZoneText">Haz clic o arrastra aquí tu archivo <strong>.docx</strong></div>
+      <div class="filename" id="docxFilename"></div>
+    </div>
+    <input type="file" id="docx" name="docx" accept=".docx" required>
+    <ul class="reslist" id="docxBatchList" style="display:none;"></ul>
+    <p class="hint" id="docxHint" style="margin-top:0.6rem;">
+      Solo se acepta <code>.docx</code>. Si el documento sigue la plantilla del proyecto,
+      detectaremos automáticamente los temas, subapartados, callouts, ejemplos y quiz.
+      <br>¿Sin plantilla? <a href="/plantilla/descargar" style="font-weight:600;">📥 Descarga la plantilla Word</a> con la convención aplicada.
+    </p>
+  </div>
+
+  <!-- Bloque 3: Versión SCORM -->
+  <div class="card">
+    <h2><span class="num">3</span> Versión de SCORM</h2>
+    <p style="font-size:0.92rem; color:var(--ink-mute); margin-bottom:1rem;">
+      Elige según el LMS donde lo vayas a subir. Si tienes dudas, marca <strong>"Ambas versiones"</strong>:
+      generamos los dos paquetes y eliges luego cuál usar.
+    </p>
+    <div class="radio-cards" data-name="scorm_version">
+      <label class="radio-card" data-value="1.2">
+        <input type="radio" name="scorm_version" value="1.2">
+        <div class="rc-title">SCORM 1.2</div>
+        <div class="rc-desc">El estándar más extendido y compatible. Lo aceptan prácticamente todos los LMS
+          (Moodle, Blackboard, TalentLMS, etc.). Reporta estado (completado/aprobado), nota global, tiempo y
+          posición. <strong>Más sencillo, máxima compatibilidad.</strong></div>
+      </label>
+      <label class="radio-card" data-value="2004">
+        <input type="radio" name="scorm_version" value="2004">
+        <div class="rc-title">SCORM 2004 (4ª ed.)</div>
+        <div class="rc-desc">Versión moderna con modelo de datos más rico: separación entre completado/aprobado,
+          puntuación normalizada, progreso granular, detalle pregunta a pregunta, objetivos de aprendizaje.
+          Necesario para informes pedagógicos detallados. <strong>Más datos, requiere LMS reciente.</strong></div>
+      </label>
+      <label class="radio-card selected" data-value="both">
+        <input type="radio" name="scorm_version" value="both" checked>
+        <div class="rc-title">⭐ Ambas versiones <span class="rc-badge">recomendado</span></div>
+        <div class="rc-desc">Generamos los dos paquetes en el mismo ZIP. Te quedas tranquilo:
+          si un LMS rechaza una, siempre tienes la otra. Sin coste adicional.</div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Bloque 4: Sistema de puntuación ponderada -->
+  <div class="card">
+    <h2><span class="num">4</span> Sistema de puntuación <span style="font-weight:400;color:var(--ink-mute);font-size:0.8rem;">(cómo se calcula la nota final)</span></h2>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 1.2rem;">
+      La nota final combina cuánto contenido ha visto el alumno y su resultado en el quiz.
+      Si tu cliente exige solo "haber visto el curso", sube la visualización; si valora más
+      el conocimiento, sube el quiz. <strong>Los pesos suman siempre 100%.</strong>
+    </p>
+
+    <div class="weights-row">
+      <div class="weight-field">
+        <label for="weight_view">Peso de la visualización</label>
+        <div class="slider-wrap">
+          <input type="range" id="weight_view" name="weight_view" min="0" max="100" value="40" step="5">
+          <output for="weight_view" id="weight_view_out">40%</output>
+        </div>
+        <span class="weight-hint">Cuánto pesa haber visto los subapartados.</span>
+      </div>
+      <div class="weight-field">
+        <label for="weight_quiz">Peso del quiz</label>
+        <div class="slider-wrap">
+          <input type="range" id="weight_quiz" name="weight_quiz" min="0" max="100" value="60" step="5">
+          <output for="weight_quiz" id="weight_quiz_out">60%</output>
+        </div>
+        <span class="weight-hint">Cuánto pesa el resultado del test.</span>
+      </div>
+    </div>
+
+    <div class="weight-preview" id="weightPreview">
+      Si el alumno ve el <strong>50%</strong> y saca <strong>80%</strong> en el quiz, su nota final será <strong id="previewScore">68%</strong>.
+    </div>
+
+    <details style="margin-top: 1rem;">
+      <summary style="cursor: pointer; font-size: 0.9rem; color: var(--ink-mute); user-select: none;">
+        ⚙ Opciones avanzadas
+      </summary>
+      <div style="margin-top: 1rem;">
+        <div class="row">
+          <div class="field">
+            <label for="view_min_seconds">Tiempo mínimo por subapartado (segundos)</label>
+            <input type="number" id="view_min_seconds" name="view_min_seconds" value="10" min="0" max="600">
+            <span class="hint">El alumno debe permanecer al menos este tiempo en cada subapartado.</span>
+          </div>
+          <div class="field">
+            <label for="view_strategy">¿Qué cuenta como "visto"?</label>
+            <select id="view_strategy" name="view_strategy">
+              <option value="both" selected>Ambos: scroll hasta el final + tiempo mínimo (recomendado)</option>
+              <option value="scroll">Solo scroll hasta el final</option>
+              <option value="time">Solo tiempo mínimo</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Bloque 5: Datos a rastrear en el LMS -->
+  <div class="card">
+    <h2><span class="num">5</span> ¿Qué información rastrear en el LMS?</h2>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 1rem;">
+      Estos son los datos que el SCORM enviará al LMS. Los <strong>recomendados</strong>
+      vienen marcados por defecto: cubren el 95% de los casos. Solo desmárcalos si tu LMS no los soporta
+      o si tu cliente pide algo específico.
+    </p>
+
+    <div class="track-grid">
+      <label class="track-item">
+        <input type="checkbox" id="track_completion" name="track_completion" checked>
+        <div>
+          <div class="track-title">Completado / no completado</div>
+          <div class="track-desc">Marca el curso como finalizado al cumplir las condiciones. <span class="track-tag">imprescindible</span></div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_score" name="track_score" checked>
+        <div>
+          <div class="track-title">Puntuación final (0–100%)</div>
+          <div class="track-desc">Envía la nota numérica al expediente del alumno.</div>
+          <div class="track-extra">
+            <label for="mastery" class="track-inline-label">Mínimo para aprobar (%):</label>
+            <input type="number" id="mastery" name="mastery" value="70" min="0" max="100" class="track-inline-input">
+          </div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_success" name="track_success" checked>
+        <div>
+          <div class="track-title">Aprobado / suspenso</div>
+          <div class="track-desc">Estado independiente de "completado". En 1.2 va unido; en 2004 son campos separados.</div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_time" name="track_time" checked>
+        <div>
+          <div class="track-title">Tiempo dedicado por sesión</div>
+          <div class="track-desc">Necesario para FUNDAE y obligaciones de horas lectivas.</div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_suspend" name="track_suspend" checked>
+        <div>
+          <div class="track-title">Guardar progreso entre sesiones</div>
+          <div class="track-desc">El alumno puede cerrar y retomar donde lo dejó. <span class="track-tag">recomendado</span></div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_location" name="track_location" checked>
+        <div>
+          <div class="track-title">Marcador de posición</div>
+          <div class="track-desc">Reabre el curso en el subapartado donde se quedó la última vez.</div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_interactions" name="track_interactions" checked>
+        <div>
+          <div class="track-title">Detalle pregunta a pregunta</div>
+          <div class="track-desc">Reporta cada respuesta del quiz al LMS. Permite informes pedagógicos. <span class="track-tag">2004 brilla aquí</span></div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_progress" name="track_progress">
+        <div>
+          <div class="track-title">Progreso granular (% de avance)</div>
+          <div class="track-desc">Barra de progreso continua en el LMS. <strong>Solo SCORM 2004.</strong> En 1.2 se ignora.</div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_objectives" name="track_objectives">
+        <div>
+          <div class="track-title">Objetivos de aprendizaje</div>
+          <div class="track-desc">Reporta cumplimiento por objetivo, no solo global. <strong>Solo SCORM 2004.</strong></div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_max_time" name="track_max_time">
+        <div>
+          <div class="track-title">Tiempo máximo permitido</div>
+          <div class="track-desc">Limita la duración del intento. Si lo activas, especifica abajo.</div>
+          <div class="track-extra">
+            <label for="max_time_minutes" class="track-inline-label">Minutos:</label>
+            <input type="number" id="max_time_minutes" name="max_time_minutes" value="120" min="1" max="1440" class="track-inline-input">
+          </div>
+        </div>
+      </label>
+
+      <label class="track-item">
+        <input type="checkbox" id="track_max_attempts" name="track_max_attempts">
+        <div>
+          <div class="track-title">Limitar intentos</div>
+          <div class="track-desc">Por defecto, intentos ilimitados. Si lo activas, especifica cuántos.</div>
+          <div class="track-extra">
+            <label for="max_attempts" class="track-inline-label">Máximo:</label>
+            <input type="number" id="max_attempts" name="max_attempts" value="3" min="1" max="20" class="track-inline-input">
+          </div>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Bloque 6: Recursos multimedia subidos -->
+  <div class="card">
+    <h2><span class="num">6</span> Recursos multimedia externos <span style="font-weight:400;color:var(--ink-mute);font-size:0.8rem;">(opcional, normalmente no es necesario)</span></h2>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 0.6rem;">
+      <strong>Cuándo SÍ lo necesitas:</strong> solo si tu Word referencia archivos
+      <em>externos</em> que no están embebidos en él (vídeos MP4, audios MP3, PDFs adicionales)
+      con tags como <code>[VIDEO] Título | video.mp4</code> o <code>[AUDIO] Pie | audio.mp3</code>.
+    </p>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 1rem;">
+      <strong>Cuándo NO lo necesitas:</strong> las <strong>imágenes ya pegadas dentro del Word</strong>
+      se extraen automáticamente, no hace falta volver a subirlas. Tampoco hace falta subir
+      audios si vas a usar la <strong>narración TTS</strong> (botón "🔊 Narración TTS" en el editor).
+    </p>
+    <div class="upload-zone" id="resZone">
+      <div class="icon">📎</div>
+      <div class="text">Haz clic o arrastra archivos externos referenciados en el Word</div>
+    </div>
+    <input type="file" id="recursos" name="recursos" multiple>
+    <ul class="reslist" id="resList"></ul>
+    <p class="hint" style="margin-top:0.6rem;">
+      Aceptados: imágenes (png/jpg/gif/svg/webp), vídeo (mp4/webm/ogv/mov),
+      audio (mp3/wav/ogg/m4a), documentos (pdf/xlsx/pptx/docx), subtítulos (vtt/srt).
+    </p>
+  </div>
+
+  <!-- Bloque 7: Recursos auto-generables -->
+  <div class="card">
+    <h2><span class="num">7</span> Recursos extra a generar e incluir</h2>
+    <p style="font-size: 0.92rem; color: var(--ink-mute); margin-bottom: 1rem;">
+      Marca qué materiales adicionales quieres que se generen automáticamente desde tu Word.
+      Todos se incluyen en la entrega final. Ninguno rompe la compatibilidad con LMS.
+    </p>
+
+    <div class="res-grid">
+      <label class="res-item">
+        <input type="checkbox" id="gen_pdf" name="gen_pdf" checked>
+        <div>
+          <div class="res-title">📄 PDF de apuntes</div>
+          <div class="res-desc">Un PDF imprimible por cada tema. Útil como material de estudio offline.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_aiken" name="gen_aiken" checked>
+        <div>
+          <div class="res-title">📝 Banco Aiken (.txt)</div>
+          <div class="res-desc">Preguntas del quiz en formato Aiken. Importable a Moodle, Canvas, etc.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_html_standalone" name="gen_html_standalone">
+        <div>
+          <div class="res-title">🌐 Versión HTML standalone</div>
+          <div class="res-desc">El mismo curso como sitio web estático (sin SCORM). Para colgar en una web propia.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_glossary" name="gen_glossary">
+        <div>
+          <div class="res-title">📚 Glosario</div>
+          <div class="res-desc">Listado de términos y definiciones detectados en el contenido.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_json" name="gen_json" checked>
+        <div>
+          <div class="res-title">🧩 Estructura JSON</div>
+          <div class="res-desc">Volcado de toda la estructura del curso para poder re-importarlo o auditarlo.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_readme" name="gen_readme" checked>
+        <div>
+          <div class="res-title">📋 README dentro del SCORM</div>
+          <div class="res-desc">Ficha con datos del curso (título, horas, autor, fecha, mastery) embebida en el ZIP.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_certificate" name="gen_certificate">
+        <div>
+          <div class="res-title">🏆 Plantilla de certificado</div>
+          <div class="res-desc">PDF imprimible con el título, horas y un hueco para nombre del alumno y firma.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_anki" name="gen_anki">
+        <div>
+          <div class="res-title">🗂 Tarjetas Anki (.csv)</div>
+          <div class="res-desc">Las preguntas del quiz exportadas como flashcards importables en Anki.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_subtitles" name="gen_subtitles">
+        <div>
+          <div class="res-title">🎬 Subtítulos auto para vídeos</div>
+          <div class="res-desc">Whisper transcribe los vídeos subidos en .vtt. Requiere <code>faster-whisper</code> instalado.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_wcag" name="gen_wcag" checked>
+        <div>
+          <div class="res-title">♿ Validación WCAG 2.1 AA</div>
+          <div class="res-desc">Revisa contraste, alt en imágenes, jerarquía de encabezados, vídeos sin subtítulos.</div>
+        </div>
+      </label>
+
+      <label class="res-item">
+        <input type="checkbox" id="gen_manifest_preview" name="gen_manifest_preview">
+        <div>
+          <div class="res-title">🔍 Vista del manifest</div>
+          <div class="res-desc">Copia del <code>imsmanifest.xml</code> fuera del ZIP para inspeccionarlo sin descomprimir.</div>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Bloque 8: Marca y colores -->
+  <div class="card">
+    <h2><span class="num">8</span> Marca y colores</h2>
+    <p class="card-help">Elige una paleta predefinida o crea la tuya. Las paletas que guardes aparecerán aquí abajo, en <em>"Mis paletas guardadas"</em>, listas para reusar en futuros cursos.</p>
+    <div class="palette-grid" id="paletteGrid"></div>
+
+    <!-- v0.5.17: paletas guardadas del usuario -->
+    <div id="userPalettesSection" style="margin-top: 1.2rem; display: none;">
+      <h3 class="palette-section-title">⭐ Mis paletas guardadas</h3>
+      <div class="palette-grid" id="userPalettesGrid"></div>
+    </div>
+
+    <details style="margin-top: 1.5rem;" id="customColorsDetails">
+      <summary style="cursor: pointer; color: var(--ink-mute); font-size: 0.95rem; font-weight: 600;">
+        🎨 ¿Quieres usar tus propios colores? (opcional)
+      </summary>
+      <p class="custom-colors-help">
+        Define tres colores en formato hexadecimal. <strong>El nombre del campo te dice dónde se usa</strong> dentro del SCORM generado:
+      </p>
+      <div style="margin-top: 1rem;" class="row">
+        <div class="field">
+          <label for="color_deep">Color cabecera (oscuro)</label>
+          <input type="color" id="color_deep" value="#0A2540">
+          <p class="field-hint">
+            Se usa en: cabecera principal, fondo de banners, números de tema, footer.
+            Debe ser un tono <strong>oscuro</strong> que contraste con texto blanco (idealmente HSL con luminosidad &lt; 30%).
+          </p>
+        </div>
+        <div class="field">
+          <label for="color_primary">Color primario</label>
+          <input type="color" id="color_primary" value="#1D4ED8">
+          <p class="field-hint">
+            Se usa en: botones principales (Comenzar, Siguiente), enlaces, marcos
+            de los callouts CLAVE, encabezados H2. Es el <strong>color principal</strong> de la marca.
+          </p>
+        </div>
+        <div class="field">
+          <label for="color_bright">Color brillante (acentos)</label>
+          <input type="color" id="color_bright" value="#2563EB">
+          <p class="field-hint">
+            Se usa en: hover de botones, badges de "completado", iconos
+            destacados, bullets de listas. Un tono <strong>más vivo y saturado</strong>
+            que el primario, para llamar la atención.
+          </p>
+        </div>
+      </div>
+      <!-- v0.5.17: previsualización en vivo -->
+      <div class="custom-colors-preview" id="customColorsPreview">
+        <p class="preview-label">Vista previa:</p>
+        <div class="preview-mockup">
+          <div class="preview-header" id="previewHeader">📚 Título del curso</div>
+          <div class="preview-body">
+            <h4 id="previewH2">Tema 1: Introducción</h4>
+            <p>Texto de un párrafo normal del curso.</p>
+            <div class="preview-callout" id="previewCallout">
+              <strong>CLAVE:</strong> Texto importante destacado en un callout.
+            </div>
+            <button class="preview-btn" id="previewBtn">Comenzar tema</button>
+          </div>
+        </div>
+      </div>
+      <!-- v0.5.17: guardar paleta -->
+      <div class="save-palette-row" id="savePaletteRow">
+        <label for="paletteName">Guardar esta combinación como nueva paleta:</label>
+        <input type="text" id="paletteName" placeholder="Ej: Marca CGD Formación" maxlength="60">
+        <button type="button" class="btn-save-palette" id="btnSavePalette">💾 Guardar paleta</button>
+        <p id="savePaletteMsg" class="save-palette-msg"></p>
+      </div>
+    </details>
+  </div>
+
+  <!-- Bloque 9: Generar -->
+  <div class="card">
+    <h2><span class="num">9</span> Generar el paquete</h2>
+    <div style="display: flex; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.6rem;">
+      <button type="button" class="btn secondary" id="btnPreview" style="flex: 0 0 auto;">👁 Vista previa</button>
+      <button type="submit" class="btn full" id="btnGenerar" style="flex: 1;">Crear paquete(s) SCORM →</button>
+      <button type="button" class="btn secondary" id="btnAddQueue" style="flex: 0 0 auto;" title="Encola este curso y deja libre el formulario para preparar otro mientras se procesa">➕ Añadir a la cola</button>
+    </div>
+    <p style="font-size: 0.82rem; color: var(--ink-mute); margin-bottom: 0.8rem;">
+      <strong>Vista previa</strong>: muestra el primer tema sin empaquetar (rápido).
+      <strong>Crear paquete</strong>: genera el SCORM ahora mismo.
+      <strong>Añadir a la cola</strong>: encola este curso para procesarlo en segundo plano,
+      mientras tú vas preparando otro distinto. Los cursos se procesan uno por uno.
+    </p>
+
+    <!-- v0.5.10: panel visual de cola -->
+    <div id="queuePanel" class="queue-panel" style="display:none;">
+      <div class="queue-header">
+        <h3>📋 Cola de cursos</h3>
+        <span class="queue-summary" id="queueSummary"></span>
+      </div>
+      <div id="queueList" class="queue-list"></div>
+    </div>
+
+    <div class="progress" id="progress">
+      <div class="step">Subiendo el documento</div>
+      <div class="step">Analizando contenido</div>
+      <div class="step">Empaquetando recursos</div>
+      <div class="step">Generando HTML del curso</div>
+      <div class="step">Creando recursos adicionales</div>
+      <div class="step">Empaquetando en SCORM</div>
+    </div>
+
+    <div class="result" id="result">
+      <h3>✓ Curso generado correctamente</h3>
+      <p id="resultStats"></p>
+      <div style="display:flex; gap: 0.7rem; flex-wrap: wrap; margin-top: 0.8rem;">
+        <a href="#" id="downloadLink" class="btn" download>Descargar paquete (ZIP)</a>
+        <a href="/biblioteca" class="btn secondary">Ir a Mis cursos →</a>
+      </div>
+      <div class="warnings" id="warnings" style="display:none;">
+        <strong>Avisos durante el procesamiento:</strong>
+        <ul id="warningsList"></ul>
+      </div>
+    </div>
+  </div>
+
+</form>
+
+<script>
+const palettes = __PALETTES_JSON__;
+let selectedPalette = "azul";
+let selectedUserPaletteColors = null;  // {deep, primary, bright} si se selecciona una user palette
+
+// ----- Render paleta predefinida -----
+const grid = document.getElementById("paletteGrid");
+for (const [name, info] of Object.entries(palettes)) {
+  const card = document.createElement("div");
+  card.className = "palette-card" + (name === "azul" ? " selected" : "");
+  card.innerHTML = `
+    <div class="palette-name">${info.label}</div>
+    <div class="palette-colors">
+      <span style="background:${info.deep}"></span>
+      <span style="background:${info.primary}"></span>
+      <span style="background:${info.bright}"></span>
+    </div>`;
+  card.onclick = () => {
+    document.querySelectorAll(".palette-card").forEach(c => c.classList.remove("selected"));
+    card.classList.add("selected");
+    selectedPalette = name;
+    selectedUserPaletteColors = null;
+  };
+  grid.appendChild(card);
+}
+
+// ----- v0.5.17: Cargar y mostrar paletas personalizadas del usuario -----
+async function loadUserPalettes() {
+  try {
+    const r = await fetch("/api/paletas");
+    if (!r.ok) return;
+    const data = await r.json();
+    const section = document.getElementById("userPalettesSection");
+    const ugrid = document.getElementById("userPalettesGrid");
+    if (!data.palettes || !data.palettes.length) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+    ugrid.innerHTML = "";
+    data.palettes.forEach(p => {
+      const card = document.createElement("div");
+      card.className = "palette-card palette-card-user";
+      card.innerHTML = `
+        <div class="palette-name">${p.name}
+          <button type="button" class="palette-del" data-id="${p.id}" title="Borrar esta paleta">×</button>
+        </div>
+        <div class="palette-colors">
+          <span style="background:${p.color_deep}"></span>
+          <span style="background:${p.color_primary}"></span>
+          <span style="background:${p.color_bright}"></span>
+        </div>`;
+      card.onclick = (e) => {
+        if (e.target.classList.contains("palette-del")) return;
+        document.querySelectorAll(".palette-card").forEach(c => c.classList.remove("selected"));
+        card.classList.add("selected");
+        selectedPalette = "__user__";
+        selectedUserPaletteColors = {
+          deep: p.color_deep,
+          primary: p.color_primary,
+          bright: p.color_bright,
+        };
+        // Auto-rellenar los color pickers para que vean los valores
+        document.getElementById("color_deep").value = p.color_deep;
+        document.getElementById("color_primary").value = p.color_primary;
+        document.getElementById("color_bright").value = p.color_bright;
+        updatePreview();
+      };
+      const delBtn = card.querySelector(".palette-del");
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`¿Borrar la paleta "${p.name}"?`)) return;
+        const r = await fetch(`/api/paletas/${p.id}`, {method: "DELETE"});
+        if (r.ok) loadUserPalettes();
+      };
+      ugrid.appendChild(card);
+    });
+  } catch (e) { console.warn("No se pudieron cargar las paletas del usuario", e); }
+}
+loadUserPalettes();
+
+// ----- v0.5.17: Preview en vivo de colores custom -----
+function updatePreview() {
+  const deep = document.getElementById("color_deep").value;
+  const primary = document.getElementById("color_primary").value;
+  const bright = document.getElementById("color_bright").value;
+  const header = document.getElementById("previewHeader");
+  const h2 = document.getElementById("previewH2");
+  const callout = document.getElementById("previewCallout");
+  const btn = document.getElementById("previewBtn");
+  if (header) header.style.background = deep;
+  if (h2) h2.style.color = primary;
+  if (callout) callout.style.borderColor = primary;
+  if (btn) btn.style.background = bright;
+}
+["color_deep", "color_primary", "color_bright"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", updatePreview);
+});
+updatePreview();
+
+// ----- v0.5.17: Guardar paleta personalizada -----
+document.getElementById("btnSavePalette").onclick = async () => {
+  const name = document.getElementById("paletteName").value.trim();
+  const msgEl = document.getElementById("savePaletteMsg");
+  msgEl.textContent = "";
+  msgEl.className = "save-palette-msg";
+  if (!name) {
+    msgEl.textContent = "✗ Pon un nombre a la paleta (ej: Marca CGD)";
+    msgEl.className = "save-palette-msg err";
+    return;
+  }
+  const body = {
+    name: name,
+    color_deep: document.getElementById("color_deep").value,
+    color_primary: document.getElementById("color_primary").value,
+    color_bright: document.getElementById("color_bright").value,
+  };
+  try {
+    const r = await fetch("/api/paletas", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      msgEl.textContent = "✗ " + (data.error || "error desconocido");
+      msgEl.className = "save-palette-msg err";
+      return;
+    }
+    msgEl.textContent = `✓ Paleta "${name}" guardada. Ya está disponible en "Mis paletas guardadas".`;
+    msgEl.className = "save-palette-msg ok";
+    document.getElementById("paletteName").value = "";
+    loadUserPalettes();
+  } catch (e) {
+    msgEl.textContent = "✗ " + e.message;
+    msgEl.className = "save-palette-msg err";
+  }
+};
+
+// ----- Comportamiento radio-cards -----
+document.querySelectorAll(".radio-cards").forEach(group => {
+  group.querySelectorAll(".radio-card").forEach(card => {
+    card.addEventListener("click", (e) => {
+      // No interceptar el click sobre el radio nativo
+      if (e.target.tagName === "INPUT") return;
+      group.querySelectorAll(".radio-card").forEach(c => c.classList.remove("selected"));
+      card.classList.add("selected");
+      const radio = card.querySelector("input[type=radio]");
+      radio.checked = true;
+      radio.dispatchEvent(new Event("change"));
+    });
+    const radio = card.querySelector("input[type=radio]");
+    radio.addEventListener("change", () => {
+      if (radio.checked) {
+        group.querySelectorAll(".radio-card").forEach(c => c.classList.remove("selected"));
+        card.classList.add("selected");
+      }
+    });
+  });
+});
+
+// ----- Modo de subida: alterna entre archivo único y múltiple -----
+const docxInput = document.getElementById("docx");
+const docxZoneText = document.getElementById("docxZoneText");
+const docxName = document.getElementById("docxFilename");
+const docxBatchList = document.getElementById("docxBatchList");
+const docxHint = document.getElementById("docxHint");
+let docxBatchFiles = [];
+
+function setUploadMode(mode) {
+  if (mode === "batch") {
+    docxInput.setAttribute("multiple", "");
+    docxZoneText.innerHTML = "Haz clic o arrastra aquí varios archivos <strong>.docx</strong>";
+    docxHint.innerHTML = "Cada archivo generará su propio SCORM con el <strong>nombre del fichero</strong> como título del paquete.";
+    docxName.textContent = "";
+    docxBatchList.style.display = "flex";
+    docxBatchFiles = [];
+    syncDocxBatch();
+  } else {
+    docxInput.removeAttribute("multiple");
+    docxZoneText.innerHTML = "Haz clic o arrastra aquí tu archivo <strong>.docx</strong>";
+    docxHint.innerHTML = "Solo se acepta <code>.docx</code>. Si el documento sigue la plantilla del proyecto, detectaremos automáticamente los temas, subapartados, callouts, ejemplos y quiz.";
+    docxBatchList.style.display = "none";
+    docxBatchFiles = [];
+    docxName.textContent = "";
+    docxZone.classList.remove("has-file");
+  }
+}
+document.querySelectorAll('input[name=upload_mode]').forEach(r => {
+  r.addEventListener("change", () => { if (r.checked) setUploadMode(r.value); });
+});
+
+// ----- DOCX upload zone -----
+const docxZone = document.getElementById("docxZone");
+docxZone.addEventListener("click", () => docxInput.click());
+["dragover","dragenter"].forEach(ev => docxZone.addEventListener(ev, e => {
+  e.preventDefault(); docxZone.classList.add("dragover");
+}));
+["dragleave","drop"].forEach(ev => docxZone.addEventListener(ev, e => {
+  e.preventDefault(); docxZone.classList.remove("dragover");
+}));
+docxZone.addEventListener("drop", e => {
+  if (e.dataTransfer.files.length) handleDocxFiles(e.dataTransfer.files);
+});
+docxInput.addEventListener("change", () => handleDocxFiles(docxInput.files));
+
+function handleDocxFiles(filelist) {
+  const mode = document.querySelector('input[name=upload_mode]:checked').value;
+  if (mode === "batch") {
+    for (const f of filelist) {
+      if (!f.name.toLowerCase().endsWith(".docx")) continue;
+      if (docxBatchFiles.some(x => x.name === f.name && x.size === f.size)) continue;
+      docxBatchFiles.push(f);
+    }
+    syncDocxBatch();
+  } else {
+    if (filelist.length) {
+      docxName.textContent = filelist[0].name;
+      docxZone.classList.add("has-file");
+      const dt = new DataTransfer();
+      dt.items.add(filelist[0]);
+      docxInput.files = dt.files;
+    }
+  }
+}
+function syncDocxBatch() {
+  docxBatchList.innerHTML = "";
+  if (!docxBatchFiles.length) {
+    docxZone.classList.remove("has-file");
+  } else {
+    docxZone.classList.add("has-file");
+  }
+  docxBatchFiles.forEach((f, idx) => {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <span class="res-icon">DOCX</span>
+      <span class="res-name">${f.name}</span>
+      <span class="res-size">${(f.size/1024).toFixed(0)} KB</span>
+      <button type="button" class="res-rm" data-i="${idx}" aria-label="Quitar">×</button>`;
+    docxBatchList.appendChild(li);
+  });
+  docxBatchList.querySelectorAll(".res-rm").forEach(b => {
+    b.onclick = () => { docxBatchFiles.splice(parseInt(b.dataset.i), 1); syncDocxBatch(); };
+  });
+  const dt = new DataTransfer();
+  docxBatchFiles.forEach(f => dt.items.add(f));
+  docxInput.files = dt.files;
+}
+
+// ----- Recursos multi-upload -----
+const resZone = document.getElementById("resZone");
+const resInput = document.getElementById("recursos");
+const resList = document.getElementById("resList");
+let resFiles = [];
+
+resZone.addEventListener("click", () => resInput.click());
+["dragover","dragenter"].forEach(ev => resZone.addEventListener(ev, e => {
+  e.preventDefault(); resZone.classList.add("dragover");
+}));
+["dragleave","drop"].forEach(ev => resZone.addEventListener(ev, e => {
+  e.preventDefault(); resZone.classList.remove("dragover");
+}));
+resZone.addEventListener("drop", e => {
+  for (const f of e.dataTransfer.files) addRes(f);
+  syncResInput();
+});
+resInput.addEventListener("change", () => {
+  for (const f of resInput.files) addRes(f);
+  syncResInput();
+});
+function addRes(file) {
+  if (resFiles.some(f => f.name === file.name && f.size === file.size)) return;
+  resFiles.push(file);
+  renderResList();
+}
+function removeRes(idx) { resFiles.splice(idx, 1); renderResList(); syncResInput(); }
+function renderResList() {
+  resList.innerHTML = "";
+  if (!resFiles.length) { resZone.classList.remove("has-file"); return; }
+  resZone.classList.add("has-file");
+  resFiles.forEach((f, idx) => {
+    const li = document.createElement("li");
+    const ext = (f.name.split(".").pop() || "").toLowerCase();
+    li.innerHTML = `
+      <span class="res-icon">${ext.toUpperCase().slice(0,4)}</span>
+      <span class="res-name">${f.name}</span>
+      <span class="res-size">${(f.size/1024).toFixed(0)} KB</span>
+      <button type="button" class="res-rm" data-i="${idx}" aria-label="Quitar">×</button>`;
+    resList.appendChild(li);
+  });
+  resList.querySelectorAll(".res-rm").forEach(b => {
+    b.onclick = () => removeRes(parseInt(b.dataset.i));
+  });
+}
+function syncResInput() {
+  const dt = new DataTransfer();
+  resFiles.forEach(f => dt.items.add(f));
+  resInput.files = dt.files;
+}
+
+// ----- Sliders de puntuación -----
+(function() {
+  const sliderView = document.getElementById("weight_view");
+  const sliderQuiz = document.getElementById("weight_quiz");
+  const outView = document.getElementById("weight_view_out");
+  const outQuiz = document.getElementById("weight_quiz_out");
+  const preview = document.getElementById("weightPreview");
+  const previewScore = document.getElementById("previewScore");
+  const masteryInput = document.getElementById("mastery");
+
+  function calcPreview() {
+    const wv = parseInt(sliderView.value);
+    const wq = parseInt(sliderQuiz.value);
+    const score = Math.round((wv * 50 + wq * 80) / 100);
+    if (previewScore) previewScore.textContent = score + "%";
+    const mastery = parseInt(masteryInput.value || "70");
+    if (preview) {
+      preview.classList.toggle("invalid", score < mastery);
+      preview.innerHTML = `Si el alumno ve el <strong>50%</strong> del contenido y saca <strong>80%</strong> en el quiz, su nota final será <strong>${score}%</strong>. (Aprobado a partir del ${mastery}%.)`;
+    }
+  }
+  function updateOutputs() {
+    outView.textContent = sliderView.value + "%";
+    outQuiz.textContent = sliderQuiz.value + "%";
+    calcPreview();
+  }
+  sliderView.addEventListener("input", () => {
+    sliderQuiz.value = 100 - parseInt(sliderView.value); updateOutputs();
+  });
+  sliderQuiz.addEventListener("input", () => {
+    sliderView.value = 100 - parseInt(sliderQuiz.value); updateOutputs();
+  });
+  masteryInput.addEventListener("input", calcPreview);
+  updateOutputs();
+})();
+
+// ----- Vista previa -----
+document.getElementById("btnPreview").addEventListener("click", async () => {
+  const mode = document.querySelector('input[name=upload_mode]:checked').value;
+  const files = (mode === "batch") ? docxBatchFiles : Array.from(docxInput.files);
+  if (!files.length) {
+    alert("Selecciona primero al menos un archivo Word para generar la vista previa.");
+    return;
+  }
+  const btn = document.getElementById("btnPreview");
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "Generando preview…";
+  try {
+    const fd = new FormData();
+    fd.append("docx", files[0]);
+    for (const f of resFiles) fd.append("recursos", f, f.name);
+    fd.append("titulo", document.getElementById("titulo").value);
+    fd.append("autor", document.getElementById("autor").value);
+    fd.append("mastery", document.getElementById("mastery").value);
+    fd.append("weight_view", document.getElementById("weight_view").value);
+    fd.append("weight_quiz", document.getElementById("weight_quiz").value);
+    fd.append("view_min_seconds", document.getElementById("view_min_seconds").value);
+    fd.append("view_strategy", document.getElementById("view_strategy").value);
+    fd.append("paleta", selectedPalette);
+    fd.append("color_deep", document.getElementById("color_deep").value);
+    fd.append("color_primary", document.getElementById("color_primary").value);
+    fd.append("color_bright", document.getElementById("color_bright").value);
+
+    const r = await fetch("/api/preview", { method: "POST", body: fd });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({error: "desconocido"}));
+      alert("Error al generar preview: " + (data.error || "desconocido"));
+      return;
+    }
+    const html = await r.text();
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (!win) alert("Tu navegador bloqueó la nueva pestaña. Permite ventanas emergentes en este sitio.");
+  } catch (e) { alert("Error: " + e.message); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+});
+
+// ===== v0.5.10: helper para construir FormData del curso actual =====
+// (extraído del submit para que la cola pueda reutilizarlo)
+function buildCourseFormData() {
+  const mode = document.querySelector('input[name=upload_mode]:checked').value;
+  const filesToSend = (mode === "batch") ? docxBatchFiles : Array.from(docxInput.files);
+  if (!filesToSend.length) return { error: "Selecciona al menos un archivo Word." };
+  const titulo = document.getElementById("titulo").value.trim();
+  if (!titulo) return { error: "Indica el título del curso." };
+  const fd = new FormData();
+  for (const f of filesToSend) fd.append("docx", f, f.name);
+  for (const f of resFiles) fd.append("recursos", f, f.name);
+  fd.append("upload_mode", mode);
+  fd.append("titulo", titulo);
+  fd.append("num_hours", document.getElementById("num_hours").value);
+  fd.append("autor", document.getElementById("autor").value);
+  fd.append("mastery", document.getElementById("mastery").value);
+  fd.append("scorm_version", document.querySelector('input[name=scorm_version]:checked').value);
+  fd.append("weight_view", document.getElementById("weight_view").value);
+  fd.append("weight_quiz", document.getElementById("weight_quiz").value);
+  fd.append("view_min_seconds", document.getElementById("view_min_seconds").value);
+  fd.append("view_strategy", document.getElementById("view_strategy").value);
+  fd.append("paleta", selectedPalette);
+  fd.append("color_deep", document.getElementById("color_deep").value);
+  fd.append("color_primary", document.getElementById("color_primary").value);
+  fd.append("color_bright", document.getElementById("color_bright").value);
+  ["track_completion","track_score","track_success","track_time","track_suspend",
+   "track_location","track_interactions","track_progress","track_objectives",
+   "track_max_time","track_max_attempts"].forEach(k => {
+    fd.append(k, document.getElementById(k).checked);
+  });
+  fd.append("max_time_minutes", document.getElementById("max_time_minutes").value);
+  fd.append("max_attempts", document.getElementById("max_attempts").value);
+  ["gen_pdf","gen_aiken","gen_html_standalone","gen_glossary","gen_json",
+   "gen_readme","gen_certificate","gen_anki","gen_subtitles","gen_wcag",
+   "gen_manifest_preview"].forEach(k => {
+    fd.append(k, document.getElementById(k).checked);
+  });
+  // Metadatos para la cola visual (no enviados al backend, solo para mostrar)
+  const filesMeta = filesToSend.map(f => f.name);
+  return { fd, meta: { titulo, paleta: selectedPalette, paletaLabel: palettes[selectedPalette]?.label || selectedPalette, mode, fileCount: filesToSend.length, fileNames: filesMeta } };
+}
+
+// ===== v0.5.10: cola de procesamiento secuencial =====
+const courseQueue = [];   // [{id, meta, fd, status, result, error}]
+let queueProcessing = false;
+
+function renderQueue() {
+  const panel = document.getElementById("queuePanel");
+  const list = document.getElementById("queueList");
+  const summary = document.getElementById("queueSummary");
+  if (!courseQueue.length) {
+    panel.style.display = "none";
+    return;
+  }
+  panel.style.display = "block";
+  const counts = courseQueue.reduce((acc, j) => { acc[j.status] = (acc[j.status]||0)+1; return acc; }, {});
+  const parts = [];
+  if (counts.pending) parts.push(`${counts.pending} en cola`);
+  if (counts.running) parts.push(`${counts.running} procesando`);
+  if (counts.done) parts.push(`${counts.done} completado(s)`);
+  if (counts.error) parts.push(`${counts.error} con error`);
+  summary.textContent = parts.join(" · ");
+  list.innerHTML = courseQueue.map(j => {
+    const stateLabel = {
+      pending: "⏳ En cola",
+      running: "⚙️ Procesando…",
+      done: "✓ Completado",
+      error: "✗ Error",
+    }[j.status] || j.status;
+    const actionsHtml = j.status === "done" && j.result
+      ? `<a class="btn" href="/api/descargar/${j.result.token}">Descargar ZIP</a>
+         <a class="btn secondary" href="/curso/${j.result.token}/editar">Editar</a>
+         <button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Quitar de la lista</button>`
+      : j.status === "error"
+      ? `<button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Quitar</button>`
+      : j.status === "pending"
+      ? `<button type="button" class="btn secondary" onclick="removeFromQueue('${j.id}')">Cancelar</button>`
+      : `<span style="font-size:0.78rem;color:var(--ink-mute);">No se puede cancelar mientras procesa</span>`;
+    const errLine = j.status === "error" ? `<div class="queue-err">Error: ${j.error || "desconocido"}</div>` : "";
+    return `
+      <div class="queue-item queue-${j.status}">
+        <div class="queue-item-head">
+          <div class="queue-item-title">${escapeHtml(j.meta.titulo)}</div>
+          <div class="queue-item-status">${stateLabel}</div>
+        </div>
+        <div class="queue-item-meta">
+          ${j.meta.fileCount} archivo(s) · paleta ${escapeHtml(j.meta.paletaLabel)} · modo ${j.meta.mode}
+        </div>
+        ${errLine}
+        <div class="queue-item-actions">${actionsHtml}</div>
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+}
+
+window.removeFromQueue = function(id) {
+  const idx = courseQueue.findIndex(j => j.id === id);
+  if (idx < 0) return;
+  const j = courseQueue[idx];
+  if (j.status === "running") return;  // no quitar el en curso
+  courseQueue.splice(idx, 1);
+  renderQueue();
+};
+
+async function processQueue() {
+  if (queueProcessing) return;
+  const next = courseQueue.find(j => j.status === "pending");
+  if (!next) return;
+  queueProcessing = true;
+  next.status = "running";
+  renderQueue();
+  try {
+    const r = await fetch("/api/generar", { method: "POST", body: next.fd });
+    const data = await r.json();
+    if (!r.ok) {
+      next.status = "error";
+      next.error = data.error || ("HTTP " + r.status);
+    } else {
+      next.status = "done";
+      next.result = data;
+    }
+  } catch (e) {
+    next.status = "error";
+    next.error = e.message || String(e);
+  } finally {
+    next.fd = null;  // liberar memoria del FormData
+    queueProcessing = false;
+    renderQueue();
+    // Procesar siguiente si lo hay
+    setTimeout(processQueue, 50);
+  }
+}
+
+document.getElementById("btnAddQueue").addEventListener("click", () => {
+  const built = buildCourseFormData();
+  if (built.error) { alert(built.error); return; }
+  const id = "j_" + Date.now() + "_" + Math.random().toString(36).slice(2,7);
+  courseQueue.push({ id, meta: built.meta, fd: built.fd, status: "pending" });
+  renderQueue();
+  // Reset suave del formulario para preparar el siguiente
+  // (sólo título y archivos; el resto de ajustes los suele querer mantener)
+  document.getElementById("titulo").value = "";
+  if (docxInput) docxInput.value = "";
+  docxBatchFiles = [];
+  const batchList = document.getElementById("batchList");
+  if (batchList) batchList.innerHTML = "";
+  resFiles = [];
+  const resourcesInput = document.getElementById("resources");
+  if (resourcesInput) resourcesInput.value = "";
+  const resList = document.getElementById("resList");
+  if (resList) resList.innerHTML = "";
+  // Auto-start
+  processQueue();
+  // Aviso visual
+  document.getElementById("queuePanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+});
+
+// ===== Submit (modo "ahora") =====
+document.getElementById("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const built = buildCourseFormData();
+  if (built.error) { alert(built.error); return; }
+
+  const btn = document.getElementById("btnGenerar");
+  const progress = document.getElementById("progress");
+  const result = document.getElementById("result");
+  btn.disabled = true;
+  btn.textContent = "Procesando...";
+  progress.classList.add("active");
+  result.classList.remove("active");
+
+  for (let i = 1; i <= 4; i++) {
+    setTimeout(() => {
+      document.querySelectorAll(".progress .step").forEach((s, idx) => {
+        s.classList.remove("active");
+        if (idx < i) s.classList.add("done");
+        if (idx === i) s.classList.add("active");
+      });
+    }, i * 350);
+  }
+
+  try {
+    const r = await fetch("/api/generar", { method: "POST", body: built.fd });
+    const data = await r.json();
+    if (!r.ok) {
+      alert("Error: " + (data.error || "desconocido"));
+      btn.disabled = false;
+      btn.textContent = "Crear paquete(s) SCORM →";
+      progress.classList.remove("active");
+      return;
+    }
+    document.querySelectorAll(".progress .step").forEach(s => {
+      s.classList.remove("active"); s.classList.add("done");
+    });
+    const stats = [];
+    if (data.num_packages) stats.push(`<strong>${data.num_packages}</strong> paquete(s) SCORM`);
+    if (data.num_topics) stats.push(`<strong>${data.num_topics}</strong> tema(s)`);
+    if (data.num_questions) stats.push(`<strong>${data.num_questions}</strong> preguntas`);
+    if (data.num_pdfs) stats.push(`<strong>${data.num_pdfs}</strong> PDF(s)`);
+    if (data.num_aiken) stats.push(`<strong>${data.num_aiken}</strong> Aiken`);
+    if (data.num_resources) stats.push(`<strong>${data.num_resources}</strong> recurso(s) extra`);
+    document.getElementById("resultStats").innerHTML = stats.join(" · ");
+    document.getElementById("downloadLink").href = "/api/descargar/" + data.token;
+    if (data.warnings && data.warnings.length) {
+      const ul = document.getElementById("warningsList");
+      ul.innerHTML = "";
+      data.warnings.forEach(w => {
+        const li = document.createElement("li");
+        li.textContent = w;
+        ul.appendChild(li);
+      });
+      document.getElementById("warnings").style.display = "block";
+    } else {
+      document.getElementById("warnings").style.display = "none";
+    }
+    result.classList.add("active");
+    result.scrollIntoView({behavior:"smooth", block:"center"});
+    btn.disabled = false;
+    btn.textContent = "Crear otro curso";
+  } catch(err) {
+    alert("Error inesperado: " + err);
+    btn.disabled = false;
+    btn.textContent = "Crear paquete(s) SCORM →";
+  }
+});
+</script>

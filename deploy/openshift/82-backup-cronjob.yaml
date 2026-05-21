@@ -1,0 +1,246 @@
+# CronJob de backup diario.
+#
+# Estrategia:
+#   1. Localizar el pod activo del Deployment scormbuilder.
+#   2. Ejecutar dentro de él un dump consistente del SQLite con `.backup`
+#      (sintaxis sqlite3 que NO requiere parar la aplicación: bloquea por
+#      ráfagas cortas y produce un fichero consistente incluso bajo escritura).
+#   3. Crear un tar.gz de /data dentro del pod, hacia stdout, y redirigirlo
+#      al PVC scormbuilder-backups montado por el pod del CronJob.
+#   4. Rotar: conservar los últimos N backups (configurable por env).
+#
+# Por qué no usar VolumeSnapshot de LVMS:
+#   - LVMS sí soporta snapshots, pero requiere VolumeSnapshotClass habilitado
+#     a nivel de cluster, y los snapshots viven dentro del mismo dispositivo
+#     físico. Si el disco falla, el snapshot se pierde igual que los datos.
+#   - El tar.gz a un PVC distinto da una copia independiente y, lo más
+#     importante, lo puedes copiar fuera del cluster con `oc cp`.
+#
+# Horario por defecto: 03:00 UTC todos los días (madrugada España).
+# Edita schedule si necesitas otra ventana.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scormbuilder-backup
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 3 * * *"     # 03:00 UTC diariamente
+  timeZone: "Europe/Madrid" # K8s 1.27+ / OKD 4.14+ soportan timeZone
+  concurrencyPolicy: Forbid # No solapar backups si uno tarda
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400  # Limpia el Job tras 24 h
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: scormbuilder
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: scormbuilder-backup
+          automountServiceAccountToken: true
+          # Tolerar SNO (control-plane es worker también)
+          tolerations:
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: true
+            fsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              # UBI con `oc` cli y sqlite3. Imagen oficial mantenida por Red Hat.
+              image: registry.redhat.io/openshift4/ose-cli:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: APP_DEPLOYMENT
+                  value: scormbuilder
+                - name: APP_NAMESPACE
+                  value: scormbuilder
+                - name: RETENTION_DAYS
+                  value: "30"
+                - name: BACKUP_DIR
+                  value: /backups
+                # ─────────────────────────────────────────────────────────
+                # OFF-cluster sync vía SSH/rsync.
+                # Si BACKUP_SSH_ENABLED!="1", el sync se OMITE y el backup
+                # se queda solo en el PVC local. Activa cuando hayas creado
+                # los Secrets descritos en deploy/RECOMENDACIONES_ADMIN.md.
+                # ─────────────────────────────────────────────────────────
+                - name: BACKUP_SSH_ENABLED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scormbuilder-backup-config
+                      key: BACKUP_SSH_ENABLED
+                      optional: true
+                - name: BACKUP_SSH_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scormbuilder-backup-config
+                      key: BACKUP_SSH_HOST
+                      optional: true
+                - name: BACKUP_SSH_USER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scormbuilder-backup-config
+                      key: BACKUP_SSH_USER
+                      optional: true
+                - name: BACKUP_SSH_PATH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scormbuilder-backup-config
+                      key: BACKUP_SSH_PATH
+                      optional: true
+                - name: BACKUP_SSH_PORT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: scormbuilder-backup-config
+                      key: BACKUP_SSH_PORT
+                      optional: true
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  TS=$(date -u +%Y%m%d-%H%M%S)
+                  OUT="$BACKUP_DIR/scormbuilder-$TS.tar.gz"
+                  mkdir -p "$BACKUP_DIR"
+
+                  # 1) Localizar pod activo del Deployment (Running + Ready)
+                  POD=$(oc -n "$APP_NAMESPACE" get pod \
+                      -l app.kubernetes.io/name=scormbuilder,app.kubernetes.io/component=web \
+                      --field-selector=status.phase=Running \
+                      -o jsonpath='{.items[0].metadata.name}')
+                  if [ -z "$POD" ]; then
+                      echo "ERROR: no se encontró un pod activo del Deployment"
+                      exit 1
+                  fi
+                  echo "[backup] pod fuente: $POD"
+
+                  # 2) Dump consistente del SQLite (no requiere parar la app)
+                  echo "[backup] dump SQLite..."
+                  oc -n "$APP_NAMESPACE" exec "$POD" -- \
+                      sh -c 'cd /data && \
+                             ( command -v sqlite3 >/dev/null 2>&1 \
+                               && sqlite3 scormbuilder.sqlite3 ".backup scormbuilder.sqlite3.bak" \
+                               || echo "(sqlite3 no disponible; tar incluirá la BD viva)" )'
+
+                  # 3) tar.gz de /data desde dentro del pod hacia este PVC.
+                  #    Excluimos el fichero .session_key — NO debe ir al backup,
+                  #    si lo restauras, mantienes sesiones activas robadas.
+                  echo "[backup] creando $OUT ..."
+                  oc -n "$APP_NAMESPACE" exec "$POD" -- \
+                      tar czf - --exclude='./.session_key' --exclude='./.readyz_probe' \
+                                --exclude='./scratch' -C /data . > "$OUT"
+
+                  SIZE=$(du -h "$OUT" | cut -f1)
+                  echo "[backup] OK: $OUT ($SIZE)"
+
+                  # 4) Limpiar el .bak temporal dentro del pod
+                  oc -n "$APP_NAMESPACE" exec "$POD" -- \
+                      rm -f /data/scormbuilder.sqlite3.bak || true
+
+                  # 5) Rotar: mantener los últimos RETENTION_DAYS
+                  echo "[backup] rotando antiguos (>$RETENTION_DAYS días)..."
+                  find "$BACKUP_DIR" -name 'scormbuilder-*.tar.gz' -mtime +"$RETENTION_DAYS" -print -delete
+
+                  # 6) Sanity: tamaño del fichero >0 y descomprimible
+                  if [ ! -s "$OUT" ]; then
+                      echo "ERROR: backup vacío"
+                      exit 1
+                  fi
+                  if ! gzip -t "$OUT"; then
+                      echo "ERROR: backup corrupto (gzip -t falló)"
+                      rm -f "$OUT"
+                      exit 1
+                  fi
+                  echo "[backup] verificación OK"
+
+                  # 7) Listado de backups existentes (para logs)
+                  echo "[backup] backups actuales:"
+                  ls -lh "$BACKUP_DIR" | tail -20
+
+                  # 8) OFF-cluster sync vía rsync/SSH (opcional).
+                  #    Activa con BACKUP_SSH_ENABLED=1 y los datos en
+                  #    scormbuilder-backup-config (ver RECOMENDACIONES_ADMIN.md).
+                  if [ "${BACKUP_SSH_ENABLED:-0}" = "1" ]; then
+                      if [ -z "${BACKUP_SSH_HOST:-}" ] || [ -z "${BACKUP_SSH_USER:-}" ] \
+                         || [ -z "${BACKUP_SSH_PATH:-}" ]; then
+                          echo "[backup-sync] FALLO: BACKUP_SSH_HOST/USER/PATH no configurados"
+                          exit 1
+                      fi
+                      if [ ! -f /etc/ssh-backup/id_rsa ]; then
+                          echo "[backup-sync] FALLO: clave SSH no encontrada en /etc/ssh-backup/id_rsa"
+                          echo "                   ¿olvidaste crear el Secret scormbuilder-backup-ssh?"
+                          exit 1
+                      fi
+                      # ose-cli no trae rsync; instalar bajo demanda.
+                      # Como readOnlyRootFilesystem=true, no podemos `dnf install`.
+                      # Solución: tar+ssh (sin necesidad de rsync). El destino debe
+                      # extraer al recibir, o conservar el tar como está.
+                      echo "[backup-sync] copiando $OUT vía SSH a $BACKUP_SSH_USER@$BACKUP_SSH_HOST:$BACKUP_SSH_PATH"
+                      ssh \
+                          -i /etc/ssh-backup/id_rsa \
+                          -o StrictHostKeyChecking=accept-new \
+                          -o UserKnownHostsFile=/tmp/known_hosts \
+                          -o ConnectTimeout=30 \
+                          -p "${BACKUP_SSH_PORT:-22}" \
+                          "$BACKUP_SSH_USER@$BACKUP_SSH_HOST" \
+                          "mkdir -p '$BACKUP_SSH_PATH' && cat > '$BACKUP_SSH_PATH/$(basename "$OUT")'" \
+                          < "$OUT"
+                      echo "[backup-sync] ✓ copia remota completada"
+                  else
+                      echo "[backup-sync] sync OFF-cluster desactivado (BACKUP_SSH_ENABLED!=1)"
+                  fi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+                # SSH key montada solo-lectura. El Secret 'scormbuilder-backup-ssh'
+                # es OPCIONAL (optional: true en el volume) — si no existe, el
+                # CronJob arranca igual y el step de sync se OMITE.
+                - name: ssh-key
+                  mountPath: /etc/ssh-backup
+                  readOnly: true
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: scormbuilder-backups
+            - name: tmp
+              emptyDir:
+                sizeLimit: 256Mi
+            - name: ssh-key
+              secret:
+                secretName: scormbuilder-backup-ssh
+                optional: true
+                defaultMode: 0400
+                items:
+                  - key: id_rsa
+                    path: id_rsa

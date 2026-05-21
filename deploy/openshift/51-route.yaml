@@ -1,0 +1,33 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: scormbuilder
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+  annotations:
+    haproxy.router.openshift.io/timeout: "10m"
+    haproxy.router.openshift.io/buffer-size: "100k"
+spec:
+  # Host autogenerado: scormbuilder-scormbuilder.apps.<cluster>.<base>
+  # Para dominio propio, descomenta y edita:
+  # host: scormbuilder.tu-dominio.com
+  to:
+    kind: Service
+    name: scormbuilder
+    weight: 100
+  port:
+    # Apuntamos al puerto del oauth-proxy (443), no al de la app (8080).
+    # Todo el tráfico externo PASA por OAuth.
+    targetPort: oauth-https
+  tls:
+    # reencrypt: el Router termina TLS con su cert, abre conexión nueva con
+    # TLS al oauth-proxy (que tiene cert service-ca). Tráfico cifrado en
+    # AMBOS tramos — apropiado cuando el oauth-proxy emite su propio cert.
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    # service-ca emite el cert con CN = scormbuilder.scormbuilder.svc; el
+    # Router necesita la CA para validarlo. La inyecta automáticamente con
+    # esta annotation en el destination CA (vacío → confiar en service-ca).
+    destinationCACertificate: ""
+  wildcardPolicy: None

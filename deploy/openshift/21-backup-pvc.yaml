@@ -1,0 +1,23 @@
+# PVC dedicado a backups. Lo monta el CronJob, NO el Deployment de la app.
+# Tener un PVC separado permite restaurar/exportar sin tocar el de datos.
+#
+# Tamaño: 30 días × 1 backup/día × (tamaño aproximado del PVC de datos
+# comprimido). Para 100Gi de datos con compresión típica ~30% → ~30 GB / mes.
+# Lo dejamos en 50 GB para tener margen y poder rotar a 60 días si conviene.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scormbuilder-backups
+  namespace: scormbuilder
+  labels:
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: lvms-vg1
+  volumeMode: Filesystem

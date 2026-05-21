@@ -1,0 +1,109 @@
+# syntax=docker/dockerfile:1.6
+#
+# SCORM Builder — imagen de producción para OKD/OpenShift.
+#
+# - Base: ubi9/python-311 (Red Hat UBI, compatible con políticas SCC restricted-v2
+#   de OpenShift y con el UID arbitrario que asigna OpenShift por defecto).
+# - Multi-stage: stage `build` instala dependencias en un venv aislado; stage
+#   `runtime` solo copia el venv + el código + binarios de sistema necesarios.
+# - Non-root: corre como UID 1001 (declarado) y permite UID arbitrario asignado
+#   por OpenShift (grupo root con permisos lectura/escritura sobre /opt/app y
+#   /data — patrón estándar OpenShift).
+# - Sin secretos en la imagen. ANTHROPIC_API_KEY y session key llegan por env.
+# - PVC se monta en /data (SCORM_BUILDER_WORK_DIR=/data).
+
+# =====================================================================
+# Stage 1: BUILD — instalar dependencias en un venv
+# =====================================================================
+FROM registry.access.redhat.com/ubi9/python-311:latest AS build
+
+USER 0
+WORKDIR /opt/app-build
+
+# Dependencias del sistema necesarias para compilar wheels (lxml para python-docx,
+# Pillow, reportlab, opencv si lo activamos, etc.). Tesseract solo se incluye
+# en runtime (no es build-time).
+RUN dnf install -y --setopt=tsflags=nodocs \
+        gcc make libffi-devel openssl-devel \
+        libjpeg-turbo-devel zlib-devel freetype-devel \
+        libxml2-devel libxslt-devel \
+    && dnf clean all && rm -rf /var/cache/dnf
+
+# venv aislado en /opt/venv → fácil de copiar tal cual al stage runtime
+RUN python3.11 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+COPY deploy/requirements.txt /tmp/requirements.txt
+RUN pip install --upgrade pip wheel setuptools \
+    && pip install -r /tmp/requirements.txt \
+    && pip install gunicorn==23.0.0
+
+# Copiar el paquete scorm_builder y hacer install editable para que las rutas
+# de `assets/` queden bien resueltas dentro del venv.
+COPY libreria /opt/app-build/libreria
+RUN pip install /opt/app-build/libreria
+
+
+# =====================================================================
+# Stage 2: RUNTIME — imagen final mínima
+# =====================================================================
+FROM registry.access.redhat.com/ubi9/python-311:latest AS runtime
+
+# Dependencias de runtime opcionales:
+#   - tesseract + tesseract-langpack-spa: OCR (desactivado por defecto pero
+#     disponible si el usuario activa detect_tables_in_images en una imagen).
+#   - fonts-dejavu: para que el PDF tenga acentos correctos. Sin esto cae a
+#     Helvetica y los caracteres no-ASCII pueden no renderizarse.
+USER 0
+RUN dnf install -y --setopt=tsflags=nodocs \
+        tesseract tesseract-langpack-spa \
+        dejavu-sans-fonts dejavu-serif-fonts \
+        shadow-utils \
+    && dnf clean all && rm -rf /var/cache/dnf
+
+# Copiar venv del stage build
+COPY --from=build /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Directorio de la aplicación
+WORKDIR /opt/app
+COPY instalador /opt/app/instalador
+COPY libreria /opt/app/libreria
+COPY deploy/gunicorn.conf.py /opt/app/gunicorn.conf.py
+COPY deploy/entrypoint.sh /opt/app/entrypoint.sh
+
+# Permisos para UID arbitrario de OpenShift:
+#   - El grupo root (GID 0) tiene read/write sobre /opt/app y /data
+#   - Esto cumple con el SCC restricted-v2 que asigna UID aleatorio + GID 0
+#   - Cuando un PVC se monta sobre /data, el fsGroup del Deployment ajusta los
+#     permisos.
+RUN mkdir -p /data \
+    && chgrp -R 0 /opt/app /data \
+    && chmod -R g=u /opt/app /data \
+    && chmod +x /opt/app/entrypoint.sh
+
+# Variables por defecto. SCORM_BUILDER_WORK_DIR apunta al PVC.
+ENV SCORM_BUILDER_WORK_DIR=/data \
+    PORT=8080 \
+    GUNICORN_WORKERS=1 \
+    GUNICORN_THREADS=8 \
+    GUNICORN_TIMEOUT=600 \
+    LANG=es_ES.UTF-8
+
+EXPOSE 8080
+
+# Usuario no-root explícito. OpenShift puede pisar este UID por uno aleatorio
+# (es lo deseado), pero declararlo evita avisos y permite correr fuera de OKD.
+USER 1001
+
+ENTRYPOINT ["/opt/app/entrypoint.sh"]
+
+# Etiquetas OCI estándar
+LABEL org.opencontainers.image.title="SCORM Builder" \
+      org.opencontainers.image.description="Generador SCORM desde DOCX para OKD/OpenShift" \
+      org.opencontainers.image.source="https://example.com/scormbuilder" \
+      org.opencontainers.image.licenses="Proprietary"

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scormbuilder
+  labels:
+    # Pod Security Standard "restricted" — el más seguro. La imagen es non-root,
+    # readOnlyRoot, sin caps añadidas → cumple sin problemas.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    # Etiqueta para identificar la app en el cluster
+    app.kubernetes.io/name: scormbuilder
+    app.kubernetes.io/part-of: scormbuilder
+  annotations:
+    openshift.io/display-name: "SCORM Builder"
+    openshift.io/description: "Generador de SCORM desde DOCX"

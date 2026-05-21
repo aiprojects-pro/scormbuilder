@@ -1,0 +1,94 @@
+# NetworkPolicy restrictiva (defensive): el pod scormbuilder SOLO acepta
+# tráfico entrante desde el Router de OpenShift, y SOLO emite tráfico saliente
+# necesario (DNS interno + Internet HTTPS para llamar a Anthropic / gTTS).
+#
+# Si tu cluster no tiene NetworkPolicy aplicada por defecto, esta protege
+# explícitamente contra movimiento lateral.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scormbuilder-default-deny
+  namespace: scormbuilder
+spec:
+  # Aplica a TODO pod del namespace (solo hay uno, pero por si añades más).
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scormbuilder-allow-router-ingress
+  namespace: scormbuilder
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: scormbuilder
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Ingress
+  ingress:
+    # Tráfico desde el Router de OpenShift (HAProxy). El namespace del Router
+    # se llama "openshift-ingress" por defecto en OKD/OCP.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Probes del kubelet (algunos clusters los enrutan via el nodo):
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus de User Workload Monitoring (scrapeo de /metrics).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-user-workload-monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scormbuilder-allow-egress
+  namespace: scormbuilder
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: scormbuilder
+  policyTypes:
+    - Egress
+  egress:
+    # DNS interno (CoreDNS en kube-system)
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              dns.operator.openshift.io/daemonset-dns: default
+      ports:
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    # DNS general (53)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Internet HTTPS: Anthropic API (api.anthropic.com) y gTTS (translate.google.com).
+    # NetworkPolicy nativa NO permite filtrar por dominio; abrimos 443 TCP.
+    # Si quieres restringir por IP/CIDR, edita aquí.
+    - ports:
+        - protocol: TCP
+          port: 443

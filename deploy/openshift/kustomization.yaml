@@ -1,0 +1,44 @@
+# Kustomization: aplica todos los manifiestos juntos con
+#   oc apply -k deploy/openshift/
+#
+# NOTA: el Secret NO se incluye aquí adrede — créalo manualmente con
+# `oc create secret generic` (ver deploy/README.md). Si lo metes aquí, los
+# valores acabarán en git.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: scormbuilder
+
+resources:
+  - 00-namespace.yaml
+  - 10-imagestream.yaml
+  - 11-buildconfig.yaml
+  - 20-pvc.yaml
+  - 21-backup-pvc.yaml
+  - 22-backup-config.yaml
+  - 30-configmap.yaml
+  - 40-deployment.yaml
+  - 41-oauth-sa.yaml
+  - 50-service.yaml
+  - 51-route.yaml
+  - 60-networkpolicy.yaml
+  - 70-pdb.yaml
+  - 80-servicemonitor.yaml
+  - 81-backup-rbac.yaml
+  - 82-backup-cronjob.yaml
+  - 83-prometheusrule.yaml
+
+commonLabels:
+  app.kubernetes.io/name: scormbuilder
+  app.kubernetes.io/part-of: scormbuilder
+
+# Si quisieras un dominio personalizado para la Route, descomenta y edita:
+# patches:
+#   - target:
+#       kind: Route
+#       name: scormbuilder
+#     patch: |-
+#       - op: add
+#         path: /spec/host
+#         value: scormbuilder.tu-dominio.com
