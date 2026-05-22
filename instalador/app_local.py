@@ -1771,9 +1771,7 @@ def _collect_scorm_units(token: str, user: dict) -> List[dict]:
         if scorm_dir.exists():
             zips = list(scorm_dir.glob("*.zip"))
             if zips:
-                # Tomar el primer zip de la carpeta scorm de cada unidad
                 zip_path = zips[0]
-                # Extraer índice del nombre de la carpeta
                 m = re.match(r"unidad_(\d+)_(.+)", unit_dir.name)
                 idx = int(m.group(1)) if m else 0
                 title = (m.group(2).replace("_", " ") if m else unit_dir.name)
@@ -1785,7 +1783,30 @@ def _collect_scorm_units(token: str, user: dict) -> List[dict]:
                 })
     if units:
         return units
-    # Fallback: zip principal
+
+    # FIX v0.7.1: MODO SINGLE — antes devolvía el ZIP "gordo" del curso
+    # entero (`row["zip_path"]`) que contiene la carpeta `salida/...`. Al
+    # subir a Moodle aparecía todo mezclado y el usuario tenía que
+    # descomprimir manualmente y borrar lo sobrante.
+    # Ahora preferimos el SCORM real generado por build_complete_course:
+    # vive en `salida/curso/scorm/*.zip` (un único SCORM con el tema).
+    single_scorm_dir = salida / "curso" / "scorm"
+    if single_scorm_dir.exists():
+        for zip_path in sorted(single_scorm_dir.glob("*.zip")):
+            # Cada zip de aquí es UN tema; en modo single hay exactamente uno.
+            # Si en el futuro un docx tuviera varios "Tema N" (Heading 1) en
+            # un mismo Word, aparecerían varios zips y los listamos todos.
+            units.append({
+                "name": row["title"],
+                "filename": zip_path.name,
+                "path": str(zip_path),
+                "unit_index": len(units),
+            })
+    if units:
+        return units
+
+    # Fallback (raro): zip principal. NO es ideal porque contiene árbol
+    # completo, pero peor es nada.
     return [{
         "name": row["title"],
         "filename": Path(row["zip_path"]).name,
@@ -2009,6 +2030,162 @@ def moodle_upload(token):
 # ============================================================
 # v0.5.17: Paletas de colores personalizadas guardadas por usuario
 # ============================================================
+
+
+# ============================================================
+# SUBIDA DE BANCOS AIKEN A MOODLE (v0.7.1)
+# ============================================================
+# Moodle NO expone un web service estándar para importar bancos Aiken al
+# banco de preguntas (no hay `core_question_import_aiken`). Lo más cercano
+# que podemos hacer es subir los `.txt` a "Archivos privados" del usuario
+# (igual que hacemos con los SCORMs), y el usuario importa con 2 clicks
+# desde Moodle: Curso → Banco de preguntas → Importar → Aiken.
+
+def _collect_aiken_files(token: str, user: dict) -> List[dict]:
+    """Lista los .txt de bancos Aiken disponibles para subir a Moodle.
+
+    Busca en las mismas ubicaciones que `api_descargar_aiken`:
+      - job_dir/aiken_extendido/*.txt
+      - job_dir/aiken/*.txt
+      - job_dir/salida/aiken/*.txt
+      - job_dir/salida/aiken_extendido/*.txt
+      - job_dir/salida/curso/aiken*/*.txt
+      - job_dir/salida/unidad_NN_*/aiken*/*.txt
+    """
+    row, _, _ = _load_course_for_user(token, user)
+    if not row:
+        return []
+    job_dir = Path(row["zip_path"]).parent
+    output_dir = job_dir / "salida"
+    out = []
+    candidates = [
+        job_dir / "aiken_extendido",
+        job_dir / "aiken",
+    ]
+    if output_dir.exists():
+        candidates += [
+            output_dir / "aiken",
+            output_dir / "aiken_extendido",
+            output_dir / "curso" / "aiken",
+            output_dir / "curso" / "aiken_extendido",
+        ]
+        for unit_dir in sorted(output_dir.glob("unidad_*")):
+            candidates += [unit_dir / "aiken", unit_dir / "aiken_extendido"]
+    seen_names = set()
+    for d in candidates:
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.txt")):
+            if f.name in seen_names:
+                continue
+            seen_names.add(f.name)
+            out.append({
+                "name": f.stem,
+                "filename": f.name,
+                "path": str(f),
+                "size": f.stat().st_size,
+            })
+    return out
+
+
+@app.route("/api/curso/<token>/moodle-upload-aiken", methods=["POST"])
+@login_required
+def moodle_upload_aiken(token):
+    """Sube los .txt de bancos Aiken del curso a Moodle (Archivos privados).
+
+    Cada fichero se sube vía `_moodle_upload_file` (draft area) y luego se
+    promueve a Archivos privados del usuario con
+    `core_user_add_user_private_files`. El usuario importará después en
+    Moodle: Curso → Banco de preguntas → Importar → Aiken → seleccionar
+    desde Archivos privados.
+    """
+    user = current_user()
+    with db() as conn:
+        course = conn.execute(
+            "SELECT id FROM courses WHERE token = ? AND user_id = ?",
+            (token, user["id"]),
+        ).fetchone()
+        if not course:
+            return jsonify({"error": "Curso no encontrado"}), 404
+        cfg = conn.execute(
+            "SELECT * FROM moodle_configs WHERE course_id = ?",
+            (course["id"],),
+        ).fetchone()
+        if not cfg:
+            return jsonify({"error": "No hay Moodle configurado para este curso"}), 400
+
+    files = _collect_aiken_files(token, user)
+    if not files:
+        return jsonify({
+            "error": "No hay bancos Aiken para subir. Genera primero un banco "
+                     "con '📚 Banco Aiken (30 preg/tema)'."
+        }), 404
+
+    moodle_url = cfg["moodle_url"]
+    moodle_token = cfg["moodle_token"]
+
+    # Pre-flight: necesitamos core_user_add_user_private_files
+    try:
+        info = _moodle_test_connection(moodle_url, moodle_token)
+    except Exception as e:
+        return jsonify({"error": f"Test de conexión Moodle falló: {e}"}), 502
+    if not info.get("has_private_files"):
+        return jsonify({
+            "error": (
+                "El token de Moodle no tiene la función "
+                "`core_user_add_user_private_files` disponible. Sin ella, los "
+                "bancos Aiken subidos se borrarían automáticamente del draft "
+                "area. Pide al admin que active esa función en el servicio "
+                "web del token."
+            )
+        }), 400
+
+    results = []
+    ok_count = 0
+    fail_count = 0
+    for f in files:
+        try:
+            draftitemid = _moodle_upload_file(
+                moodle_url, moodle_token, Path(f["path"]),
+            )
+            promoted, promote_err = _moodle_promote_draft_to_private(
+                moodle_url, moodle_token, draftitemid,
+            )
+            results.append({
+                "name": f["name"],
+                "filename": f["filename"],
+                "ok": promoted,
+                "draftitemid": draftitemid,
+                "in_private_files": promoted,
+                "error": promote_err,
+            })
+            if promoted:
+                ok_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            results.append({
+                "name": f["name"],
+                "filename": f["filename"],
+                "ok": False,
+                "error": str(e),
+            })
+            fail_count += 1
+
+    return jsonify({
+        "ok": ok_count > 0,
+        "ok_count": ok_count,
+        "fail_count": fail_count,
+        "results": results,
+        "next_steps": (
+            "En Moodle: entra en tu curso → 'Banco de preguntas' (en el menú "
+            "del curso) → 'Importar' → Formato 'Aiken' → 'Seleccionar archivo' "
+            "→ pestaña 'Archivos privados' → elige el .txt subido → "
+            "'Importar'. Repite para cada banco."
+        ),
+        "moodle_url": moodle_url,
+    })
+
 
 def _is_valid_hex_color(s: str) -> bool:
     """True si s es un color hexadecimal válido (#RRGGBB o #RGB)."""
@@ -3940,6 +4117,141 @@ def course_ai_copyright(token):
     return jsonify(result)
 
 
+def _rebuild_scorm_after_edit(course, job_dir, output_dir, unit_dirs, single_dir,
+                              is_batch, errors_collector=None):
+    """Re-empaqueta TODOS los SCORMs del curso tras una edición (TTS, enrich
+    IA, etc.). Devuelve la lista de zips generados.
+
+    Soporta modo batch (una unidad por carpeta `unidad_NN_*`) y single
+    (carpeta `curso/`). Reescribe `salida/<unidad>/scorm/*.zip` (batch) o
+    `salida/curso/scorm/*.zip` (single) con el contenido actual del
+    `course` y los recursos LOCALES (donde están las imágenes, audios, PDFs).
+    """
+    if errors_collector is None:
+        errors_collector = []
+    from scorm_builder.themes import get_theme as _get_theme
+    from scorm_builder.themes import THEMES as _THEMES
+    from scorm_builder.renderer import render_html as _render_html
+    from scorm_builder.packager import build_scorm_package as _build_scorm_pkg
+    pal = course.metadata.palette
+    theme_obj = _get_theme(pal if pal in _THEMES else "azul")
+    # audio_filenames y pdf_filenames (para inyectar botones en cabecera)
+    audio_fns = {
+        t.number: getattr(t, "audio_filename", None)
+        for t in course.topics
+        if getattr(t, "audio_filename", None)
+    }
+    course_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_",
+                          course.metadata.title.lower())[:40]
+
+    if is_batch:
+        # Una unidad por tema, recursos locales en unidad_XX/recursos
+        for ti, topic_obj in enumerate(course.topics):
+            idx_str = f"{ti+1:02d}"
+            matching = [d for d in unit_dirs
+                        if d.name.startswith(f"unidad_{idx_str}_")]
+            if not matching:
+                continue
+            unit_dir = matching[0]
+            unit_scorm_dir = unit_dir / "scorm"
+            unit_recursos = unit_dir / "recursos" if (unit_dir / "recursos").exists() else None
+            # PDF: si vive en unidad_XX/pdfs/, lo copiamos a recursos/ para
+            # que el link recursos/apuntes_TNN.pdf funcione dentro del ZIP.
+            pdf_fns_unit = {}
+            unit_pdfs_dir = unit_dir / "pdfs"
+            pdf_name = f"apuntes_T{topic_obj.number:02d}.pdf"
+            if unit_pdfs_dir.exists() and (unit_pdfs_dir / pdf_name).exists():
+                if unit_recursos is None:
+                    unit_recursos = unit_dir / "recursos"
+                    unit_recursos.mkdir(parents=True, exist_ok=True)
+                target_pdf = unit_recursos / pdf_name
+                if not target_pdf.exists():
+                    try:
+                        shutil.copy2(unit_pdfs_dir / pdf_name, target_pdf)
+                    except OSError as e:
+                        errors_collector.append(f"copia PDF unidad {idx_str}: {e}")
+                pdf_fns_unit[topic_obj.number] = pdf_name
+
+            # Renderizar el HTML solo de este topic (pero render_html exige
+            # el course entero; lo hacemos una vez fuera del bucle estaría
+            # mejor — pero por simplicidad lo dejamos así, el coste es bajo)
+            htmls = _render_html(
+                course, theme_obj,
+                pdf_filenames=pdf_fns_unit or None,
+                audio_filenames={topic_obj.number: audio_fns[topic_obj.number]} if topic_obj.number in audio_fns else None,
+            )
+            html_content = htmls.get(topic_obj.number)
+            if not html_content:
+                continue
+            if unit_scorm_dir.exists():
+                shutil.rmtree(unit_scorm_dir, ignore_errors=True)
+            unit_scorm_dir.mkdir(parents=True, exist_ok=True)
+            topic_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_",
+                                topic_obj.title.lower())[:40]
+            zip_name = f"{course_slug}_T{topic_obj.number:02d}_{topic_slug}_scorm.zip"
+            try:
+                _build_scorm_pkg(
+                    topic=topic_obj,
+                    html_content=html_content,
+                    course_title=course.metadata.title,
+                    output_path=unit_scorm_dir / zip_name,
+                    recursos_dir=unit_recursos,
+                    mastery=course.metadata.mastery,
+                )
+            except Exception as e:
+                errors_collector.append(f"Rebuild T{topic_obj.number}: {e}")
+    else:
+        # Single: un único SCORM en salida/curso/scorm/
+        if single_dir.exists() and (single_dir / "recursos").exists():
+            target_dir = single_dir
+            recursos_dir = single_dir / "recursos"
+        else:
+            target_dir = output_dir
+            recursos_dir = output_dir / "recursos" if (output_dir / "recursos").exists() else None
+        scorm_dir = target_dir / "scorm"
+        if scorm_dir.exists():
+            shutil.rmtree(scorm_dir, ignore_errors=True)
+        # Copiar PDFs a recursos/ si están en pdfs/
+        if (target_dir / "pdfs").exists() and recursos_dir is not None:
+            for pdf in (target_dir / "pdfs").glob("apuntes_T*.pdf"):
+                dst = recursos_dir / pdf.name
+                if not dst.exists():
+                    try:
+                        shutil.copy2(pdf, dst)
+                    except OSError:
+                        pass
+        from scorm_builder.api import rebuild_from_structure as _rebuild
+        try:
+            _rebuild(
+                course=course,
+                output_dir=target_dir,
+                theme=pal,
+                recursos_dir=recursos_dir,
+                generate_pdfs=False,
+                generate_aiken=False,
+            )
+        except Exception as e:
+            errors_collector.append(f"Rebuild single: {e}")
+
+    # Re-comprimir el ZIP descargable del curso
+    job_dir_p = Path(job_dir)
+    token_from_dir = job_dir_p.name.split("_", 1)[-1] if "_" in job_dir_p.name else job_dir_p.name
+    final_zip = job_dir_p / f"curso_{token_from_dir}.zip"
+    # No lo borramos forzosamente: solo si vamos a recrear
+    if final_zip.exists():
+        try:
+            final_zip.unlink()
+        except OSError:
+            pass
+    try:
+        with zipfile.ZipFile(final_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in output_dir.rglob("*"):
+                if path.is_file():
+                    zf.write(path, arcname=str(path.relative_to(output_dir)))
+    except Exception as e:
+        errors_collector.append(f"Re-comprimir ZIP final: {e}")
+
+
 def _collect_download_filenames(course, recursos_dir: Optional[Path] = None):
     """Devuelve (pdf_filenames, audio_filenames) para que render_html inyecte
     los botones "Descargar apuntes (PDF)" y "Descargar audio del tema" en la
@@ -4198,6 +4510,24 @@ def course_ai_enrich_all(token):
                 _update_job(jid, progress=ti + 1,
                             log_msg=f"✓ Tema {ti+1}: {t_detail['tags']} tags, {t_detail['callouts']} callouts, {t_detail['quiz_final']}q final + {t_detail['quiz_inline']}q inline")
 
+            # v0.7.1: re-empaquetar SCORM al final para que las nuevas
+            # preguntas/callouts aparezcan SIN tener que pulsar "Guardar
+            # todo" después. Antes era el usuario quien tenía que hacerlo
+            # y muchas veces se le olvidaba → SCORM sin quiz IA.
+            try:
+                _update_job(jid, current_step="Re-empaquetando SCORM con IA aplicada...")
+                from scorm_builder.api import course_from_dict
+                course_obj = course_from_dict(data)
+                output_dir_e = job_dir / "salida"
+                unit_dirs_e = sorted(output_dir_e.glob("unidad_*")) if output_dir_e.exists() else []
+                is_batch_e = bool(unit_dirs_e)
+                single_dir_e = output_dir_e / "curso"
+                _rebuild_scorm_after_edit(course_obj, job_dir, output_dir_e,
+                                          unit_dirs_e, single_dir_e, is_batch_e,
+                                          errors_collector=errors_list)
+            except Exception as e:
+                errors_list.append(f"Re-empaquetado post-enrich falló: {e}")
+
             # Estado final
             _update_job(jid, state="done", current_step="Completado",
                         result={
@@ -4445,6 +4775,10 @@ def course_ai_aiken_extendido(token):
         n = max(10, min(60, int(payload.get("n", 30))))
     except (TypeError, ValueError):
         return jsonify({"error": "Parámetro n inválido"}), 400
+    # v0.7.1: complejidad seleccionable. Acepta basico/intermedio/avanzado/mixto.
+    complexity = str(payload.get("complexity", "mixto")).strip().lower()
+    if complexity not in ("basico", "intermedio", "avanzado", "mixto"):
+        complexity = "mixto"
 
     with open(structure_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -4455,9 +4789,28 @@ def course_ai_aiken_extendido(token):
     course = course_from_dict(data)
     course_dir = Path(row["zip_path"]).parent
     aiken_dir = course_dir / "aiken_extendido"
-    files = build_extended_aiken(course, aiken_dir, n_questions_per_topic=n)
+    files = build_extended_aiken(
+        course, aiken_dir,
+        n_questions_per_topic=n,
+        complexity=complexity,
+    )
     if not files:
-        return jsonify({"error": "No se pudo generar el banco extendido"}), 502
+        # v0.7.1: diagnóstico más informativo. Las causas habituales son:
+        #   - ANTHROPIC_API_KEY caducada / sin saldo
+        #   - El docx tiene muy poco contenido didáctico (filtrado por
+        #     exclude_paratext) → contenido vacío → IA devuelve []
+        #   - Modelo bloqueado / red sin salida HTTPS al endpoint
+        return jsonify({
+            "error": (
+                "No se generó ningún banco Aiken. Causas habituales:\n"
+                "  • La API key de Anthropic no es válida o no tiene saldo.\n"
+                "  • El contenido del curso es demasiado corto (¿todos los "
+                "subapartados son objetivos o bibliografía?).\n"
+                "  • No hay conexión saliente HTTPS al endpoint de la IA.\n"
+                "Revisa los logs de la app (`oc logs deployment/scormbuilder`) "
+                "para ver el error concreto."
+            ),
+        }), 502
     return jsonify({"ok": True, "files": [f.name for f in files]})
 
 
@@ -5191,11 +5544,66 @@ def course_tts(token):
                 course = course_from_dict(data)
                 recursos_dir_rebuild = None
                 if is_batch:
-                    # En batch, rebuild_from_structure trata cada unidad por
-                    # separado en course_structure_save. Aquí nos limitamos
-                    # a re-comprimir el ZIP del propio job_dir (las unidades
-                    # ya tienen su audio en su recursos/).
-                    pass
+                    # FIX v0.7.1: en batch hay UN SCORM por unidad, cada uno
+                    # con su recursos/. Iteramos las unidades, regeneramos
+                    # cada SCORM con su audio local. Antes esto era `pass` y
+                    # el audio quedaba en recursos/ pero NO entraba al ZIP.
+                    from scorm_builder.themes import get_theme as _get_theme
+                    from scorm_builder.themes import THEMES as _THEMES
+                    from scorm_builder.renderer import render_html as _render_html
+                    from scorm_builder.packager import build_scorm_package as _build_scorm_pkg
+                    from scorm_builder.parser import (
+                        CourseStructure as _CS,
+                    )
+                    # Tema actual del worker → ya escribimos audio en su
+                    # recursos local. Iteramos topics + unit_dirs en paralelo.
+                    pal = course.metadata.palette
+                    theme_obj = _get_theme(pal if pal in _THEMES else "azul")
+                    course_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_",
+                                          course.metadata.title.lower())[:40]
+                    # Renderizar TODOS los topics una vez con audio_filenames
+                    audio_fns = {
+                        t.number: getattr(t, "audio_filename", None)
+                        for t in course.topics
+                        if getattr(t, "audio_filename", None)
+                    }
+                    htmls_all = _render_html(
+                        course, theme_obj,
+                        audio_filenames=audio_fns or None,
+                    )
+                    for ti2, topic_obj in enumerate(course.topics):
+                        idx_str = f"{ti2+1:02d}"
+                        matching = [d for d in unit_dirs
+                                    if d.name.startswith(f"unidad_{idx_str}_")]
+                        if not matching:
+                            continue
+                        unit_dir = matching[0]
+                        unit_scorm_dir = unit_dir / "scorm"
+                        unit_recursos = unit_dir / "recursos" if (unit_dir / "recursos").exists() else None
+                        # Limpiar scorm viejo
+                        if unit_scorm_dir.exists():
+                            shutil.rmtree(unit_scorm_dir, ignore_errors=True)
+                        unit_scorm_dir.mkdir(parents=True, exist_ok=True)
+                        html_content = htmls_all.get(topic_obj.number)
+                        if not html_content:
+                            continue
+                        topic_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_",
+                                            topic_obj.title.lower())[:40]
+                        zip_name = (
+                            f"{course_slug}_T{topic_obj.number:02d}_"
+                            f"{topic_slug}_scorm.zip"
+                        )
+                        try:
+                            _build_scorm_pkg(
+                                topic=topic_obj,
+                                html_content=html_content,
+                                course_title=course.metadata.title,
+                                output_path=unit_scorm_dir / zip_name,
+                                recursos_dir=unit_recursos,
+                                mastery=course.metadata.mastery,
+                            )
+                        except Exception as e:
+                            errors.append(f"Rebuild unidad T{topic_obj.number}: {e}")
                 else:
                     if single_dir.exists() and (single_dir / "recursos").exists():
                         recursos_dir_rebuild = single_dir / "recursos"

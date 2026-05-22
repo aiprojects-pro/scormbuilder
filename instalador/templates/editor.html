@@ -142,6 +142,7 @@
       h += '<div class="ed-group ed-group-export" data-label="Revisar y exportar">';
       h += '<button type="button" class="btn secondary ed-act-wcag-check" title="Comprueba la accesibilidad del curso según WCAG 2.1 AA">🔍 Validar WCAG 2.1 AA</button>';
       h += '<button type="button" class="btn secondary ed-act-download-aiken" title="Descarga las preguntas Aiken como archivo ZIP separado (para subir a Moodle o sistemas externos)">📥 Aiken (.zip)</button>';
+      h += '<button type="button" class="btn secondary ed-act-aiken-moodle" title="Sube los bancos Aiken a \'Archivos privados\' de tu Moodle. Luego los importarás desde Banco de preguntas → Importar → Aiken">📤 Subir Aiken a Moodle</button>';
       h += '<button type="button" class="btn secondary ed-act-export-imscp" title="Exporta como paquete IMS Content Package para Moodle">📦 IMS CP (Moodle)</button>';
       h += '<button type="button" class="btn secondary ed-act-export-cmi5" title="Exporta como paquete cmi5 / xAPI">⚡ cmi5 / xAPI</button>';
       h += '<button type="button" class="btn ed-act-moodle-upload" title="Sube los paquetes SCORM directamente a un curso de Moodle">📤 Subir a Moodle</button>';
@@ -1001,20 +1002,165 @@
       });
 
       // ----- BANCO AIKEN EXTENDIDO -----
+      // v0.7.2: modal con form (input numérico + selector complejidad) en
+      // lugar de 2 prompt() encadenados. Las opciones quedan más claras
+      // y el usuario ve los rangos válidos sin tener que recordar.
       bindAct('aiken-ext', async (btn) => {
-          if (!confirm('Esto pedirá a la IA 30 preguntas adicionales por cada tema (banco para evaluación externa). Puede tardar varios minutos. ¿Continuar?')) return;
+          const config = await openAikenConfigDialog();
+          if (!config) return;   // cancelado
+          const {n, complexity} = config;
+          if (!confirm('Esto pedirá a la IA ' + n + ' preguntas por tema, nivel "' + complexity + '". Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
-          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-aiken-extendido', {n: 30});
+          const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-aiken-extendido',
+                                     {n: n, complexity: complexity});
           if (!data) return;
           const list = (data.files || []).map(f => '• ' + f).join('\n');
-          alert('✓ Banco Aiken extendido generado:\n\n' + list + '\n\nLos archivos están en la carpeta del curso (aiken_extendido/). Cuando guardes el curso se incluirán en el ZIP descargable.');
-          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken extendidos generados.');
+          alert('✓ Banco Aiken extendido generado (' + n + ' preg/tema, nivel ' + complexity + '):\n\n' + list +
+                '\n\nLos archivos están en la carpeta del curso (aiken_extendido/). ' +
+                'Cuando guardes el curso se incluirán en el ZIP descargable.');
+          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken (' + complexity + ', ' + n + ' preg) generados.');
         });
+
+    // Modal de configuración Aiken. Devuelve {n, complexity} o null si cancela.
+    function openAikenConfigDialog() {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'aiken-dialog-bg';
+        overlay.innerHTML =
+          '<div class="aiken-dialog" role="dialog" aria-labelledby="akd-title">' +
+            '<div class="aiken-dialog-head">' +
+              '<h3 id="akd-title">📚 Configurar banco Aiken (IA)</h3>' +
+              '<button type="button" class="aiken-close" aria-label="Cerrar">×</button>' +
+            '</div>' +
+            '<div class="aiken-dialog-body">' +
+              '<label class="akd-field">' +
+                '<span class="akd-label">Nº de preguntas por tema</span>' +
+                '<input type="number" id="akd-n" min="10" max="60" step="1" value="30">' +
+                '<span class="akd-hint">Mínimo 10, máximo 60. Si la IA no consigue generar al menos 10 válidas para un tema, ese tema se omite y aparece un aviso.</span>' +
+              '</label>' +
+              '<fieldset class="akd-field">' +
+                '<legend class="akd-label">Nivel de complejidad (taxonomía de Bloom)</legend>' +
+                '<label class="akd-radio"><input type="radio" name="akd-cx" value="basico"><span><strong>Básico</strong> — recuerdo y comprensión. Preguntas tipo "¿Qué es...?".</span></label>' +
+                '<label class="akd-radio"><input type="radio" name="akd-cx" value="intermedio"><span><strong>Intermedio</strong> — aplicación a casos sencillos.</span></label>' +
+                '<label class="akd-radio"><input type="radio" name="akd-cx" value="avanzado"><span><strong>Avanzado</strong> — análisis, evaluación, casos complejos.</span></label>' +
+                '<label class="akd-radio"><input type="radio" name="akd-cx" value="mixto" checked><span><strong>Mixto</strong> (recomendado) — distribución equilibrada Bloom.</span></label>' +
+              '</fieldset>' +
+              '<p class="akd-rules">Reglas aplicadas: cada pregunta tendrá <strong>exactamente 4 opciones</strong> (A, B, C, D) con una sola correcta. Las que no cumplan se descartan automáticamente.</p>' +
+            '</div>' +
+            '<div class="aiken-dialog-foot">' +
+              '<button type="button" class="btn secondary" id="akd-cancel">Cancelar</button>' +
+              '<button type="button" class="btn" id="akd-go">✨ Generar</button>' +
+            '</div>' +
+          '</div>';
+        document.body.appendChild(overlay);
+
+        function close(result) {
+          overlay.remove();
+          resolve(result);
+        }
+        overlay.querySelector('.aiken-close').onclick = () => close(null);
+        overlay.querySelector('#akd-cancel').onclick = () => close(null);
+        overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+        overlay.querySelector('#akd-go').onclick = () => {
+          const nEl = overlay.querySelector('#akd-n');
+          const n = parseInt(nEl.value, 10);
+          if (isNaN(n) || n < 10 || n > 60) {
+            nEl.focus();
+            nEl.style.borderColor = '#dc2626';
+            return;
+          }
+          const cxEl = overlay.querySelector('input[name="akd-cx"]:checked');
+          const complexity = cxEl ? cxEl.value : 'mixto';
+          close({n, complexity});
+        };
+        // Foco inicial en el input numérico
+        setTimeout(() => overlay.querySelector('#akd-n').focus(), 50);
+      });
+    }
       // ----- DESCARGAR BANCO AIKEN COMO ZIP APARTE (v0.5.11) -----
+      // v0.7.1: antes hacíamos `window.location.href = ...` que NAVEGABA fuera
+      // del editor. Si el endpoint devolvía 404 (no hay bancos generados),
+      // el navegador mostraba el JSON crudo y "echaba" al usuario del editor.
+      // Ahora hacemos fetch + blob para descargar SIN salir; los errores se
+      // muestran como alert.
       bindAct('download-aiken', async (btn) => {
-          // Disparar la descarga directa
-          window.location.href = '/api/curso/' + TOKEN + '/aiken-zip';
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = '⏳ Descargando...';
+          try {
+            const res = await fetch('/api/curso/' + TOKEN + '/aiken-zip');
+            if (!res.ok) {
+              let msg = 'No hay bancos Aiken para descargar.';
+              try {
+                const j = await res.json();
+                if (j.error) msg = j.error;
+              } catch (e) {}
+              alert(msg + '\n\nGenera primero un banco con "📚 Banco Aiken (30 preg/tema)" o regenera el curso con la opción "banco Aiken" marcada.');
+              return;
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            // Intentar coger el filename del Content-Disposition
+            const cd = res.headers.get('Content-Disposition') || '';
+            const m = cd.match(/filename="?([^";]+)"?/i);
+            a.download = m ? m[1] : 'aiken.zip';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 100);
+            setStatus('✓ Banco Aiken descargado.');
+          } catch (e) {
+            alert('Error descargando el banco Aiken: ' + e);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = orig;
+          }
         });
+      // ----- SUBIR AIKEN A MOODLE (v0.7.1) -----
+      // Sube los .txt del banco Aiken a "Archivos privados" del usuario en
+      // Moodle. La importación al banco de preguntas sigue siendo manual
+      // (Moodle no expone API REST estándar para Aiken).
+      bindAct('aiken-moodle', async (btn) => {
+          if (!confirm(
+              'Esto subirá los bancos Aiken (.txt) a "Archivos privados" de tu Moodle.\n\n' +
+              'Después, EN MOODLE, tendrás que importarlos manualmente:\n' +
+              '  Curso → Banco de preguntas → Importar → Aiken → Archivos privados\n\n' +
+              '¿Continuar?'
+          )) return;
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = '⏳ Subiendo...';
+          try {
+            const res = await fetch('/api/curso/' + TOKEN + '/moodle-upload-aiken', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: '{}',
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              alert((data.error || 'Error desconocido'));
+              return;
+            }
+            let msg = '✓ Subida Aiken a Moodle:\n\n';
+            msg += '  • ' + data.ok_count + ' fichero(s) subido(s) a Archivos privados\n';
+            if (data.fail_count) msg += '  • ' + data.fail_count + ' fallido(s)\n';
+            msg += '\nPRÓXIMOS PASOS (en Moodle):\n';
+            msg += '  1. Entra en tu curso destino\n';
+            msg += '  2. Banco de preguntas → Importar\n';
+            msg += '  3. Formato: Aiken\n';
+            msg += '  4. Seleccionar archivo → pestaña "Archivos privados" → elige .txt\n';
+            msg += '  5. Importar (repite por cada tema)';
+            alert(msg);
+            setStatus('✓ ' + data.ok_count + ' banco(s) Aiken subido(s) a Moodle.');
+          } catch (e) {
+            alert('Error de red: ' + e);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = orig;
+          }
+        });
+
       // ----- SUBIR A MOODLE (v0.5.15) -----
       bindAct('moodle-upload', async (btn) => {
           // Abre el modal de configuración + subida
@@ -1047,6 +1193,59 @@
       // ============================================================
       // HANDLERS FASE 4: alt-text IA, WCAG check, vista previa iframe
       // ============================================================
+
+      // ----- BOTÓN "Reemplazar archivo" en bloques image/audio/video/... -----
+      // Sustituye el src del bloque actual con un nuevo upload sin crear
+      // un bloque nuevo. Mantiene alt/pie/posición.
+      document.querySelectorAll('.ed-replace-file').forEach(btn => {
+        btn.onclick = async () => {
+          collectChanges();
+          const ti = parseInt(btn.dataset.topic);
+          const si = parseInt(btn.dataset.sub);
+          const bi = parseInt(btn.dataset.block);
+          const block = course.topics[ti].subsections[si].blocks[bi];
+          if (!block) return;
+          const inp = document.createElement('input');
+          inp.type = 'file';
+          // Filtramos extensiones según tipo de bloque para evitar errores.
+          if (block.type === 'image') inp.accept = '.png,.jpg,.jpeg,.gif,.webp,.svg,.bmp,.tif,.tiff';
+          else if (block.type === 'audio') inp.accept = '.mp3,.wav,.ogg,.m4a';
+          else if (block.type === 'video') inp.accept = '.mp4,.webm,.ogv,.mov';
+          else if (block.type === 'download') inp.accept = '.pdf,.docx,.xlsx,.pptx,.txt,.csv';
+          inp.onchange = async () => {
+            const file = inp.files && inp.files[0];
+            if (!file) return;
+            btn.disabled = true;
+            const orig = btn.textContent;
+            btn.textContent = '⏳ Subiendo...';
+            try {
+              const fd = new FormData();
+              fd.append('file', file);
+              const res = await fetch('/api/curso/' + TOKEN + '/upload-resource', {
+                method: 'POST', body: fd,
+              });
+              const data = await res.json();
+              if (!res.ok || !data.ok) {
+                alert('No se pudo subir: ' + (data.error || res.status));
+                return;
+              }
+              // Sustituir extras.src/file. Mantiene block.text (alt) y el resto.
+              block.extras = block.extras || {};
+              block.extras.src = data.filename;
+              block.extras.file = data.filename;
+              markDirty();
+              setStatus('✓ Archivo reemplazado: ' + data.filename + '. Pulsa "Guardar este bloque" 💾 o "Guardar todo" para reempaquetar.');
+              render();
+            } catch (e) {
+              alert('Error subiendo el fichero: ' + e);
+            } finally {
+              btn.disabled = false;
+              btn.textContent = orig;
+            }
+          };
+          inp.click();
+        };
+      });
 
       // ----- BOTÓN "Sugerir alt con IA" en bloques imagen -----
       document.querySelectorAll('.ed-alt-ia').forEach(btn => {
@@ -2070,9 +2269,15 @@
         const placeholder = (t === 'embed') ? 'URL de YouTube/Vimeo' : 'archivo en /recursos o URL';
         let altBtn = '';
         let copyBtn = '';
+        let replaceBtn = '';
         let preview = '';
         const src = (b.extras && b.extras.src) || '';
         const isLocal = src && !/^(https?:|data:)/i.test(src);
+        // v0.7.1: botón "Reemplazar archivo" — sustituye el src del bloque
+        // actual con un nuevo upload, sin crear un bloque nuevo. Sirve
+        // tanto para image/audio/video/resource/download.
+        replaceBtn = '<button type="button" class="btn-ai-mini ed-replace-file" ' + dataAttrs +
+                     ' title="Sustituir este archivo por otro (mantiene alt/pie/posición)">🔄 Reemplazar archivo</button>';
         if (t === 'image') {
           if (isLocal) {
             altBtn = '<button type="button" class="btn-ai-mini ed-alt-ia" ' + dataAttrs + ' data-filename="' + escapeHtml(src) + '" title="Generar texto alternativo descriptivo con IA (WCAG 1.1.1)">🤖 Sugerir alt con IA</button>';
@@ -2108,7 +2313,7 @@
             '<label class="ed-mm-lbl">Archivo:</label>' +
             '<input type="text" ' + dataAttrs + ' data-extra="src" placeholder="' + placeholder + '" value="' + escapeHtml((b.extras && b.extras.src) || '') + '">' +
           '</div>' +
-          '<div class="ed-mm-buttons">' + altBtn + copyBtn + '</div>' +
+          '<div class="ed-mm-buttons">' + replaceBtn + altBtn + copyBtn + '</div>' +
           '</div>';
       }
       // Texto largo: textarea, con clase visual si es callout/cita/ejemplo.
@@ -2755,6 +2960,99 @@
     }
 
     /* v0.5.15: Modal Subir a Moodle */
+    /* v0.7.2: modal de configuración Aiken (mismo patrón que moodle-dialog
+       pero con cabecera morada para distinguirlo visualmente). */
+    .aiken-dialog-bg {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 23, 42, 0.65);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    }
+    .aiken-dialog {
+      background: white;
+      border-radius: 12px;
+      width: 92%;
+      max-width: 560px;
+      max-height: 92vh;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 12px 50px rgba(0,0,0,0.3);
+    }
+    .aiken-dialog-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 1.4rem;
+      background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+      color: white;
+    }
+    .aiken-dialog-head h3 { margin: 0; font-size: 1.15rem; }
+    .aiken-close {
+      background: rgba(255,255,255,0.2); color: white;
+      border: 0; width: 28px; height: 28px; border-radius: 50%;
+      font-size: 1.4rem; line-height: 1; cursor: pointer;
+    }
+    .aiken-close:hover { background: rgba(255,255,255,0.35); }
+    .aiken-dialog-body { padding: 1.2rem 1.5rem; overflow-y: auto; flex: 1; }
+    .aiken-dialog-foot {
+      display: flex; justify-content: flex-end; gap: 0.6rem;
+      padding: 0.8rem 1.4rem;
+      border-top: 1px solid #E2E8F0;
+      background: #F8FAFC;
+    }
+    .akd-field {
+      display: block;
+      margin-bottom: 1rem;
+      padding: 0;
+      border: 0;
+    }
+    .akd-label {
+      display: block;
+      font-weight: 600;
+      color: #0F172A;
+      margin-bottom: 0.3rem;
+    }
+    .akd-hint {
+      display: block;
+      font-size: 0.85rem;
+      color: #64748B;
+      margin-top: 0.3rem;
+    }
+    #akd-n {
+      width: 100%;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid #CBD5E1;
+      border-radius: 6px;
+      font-size: 1rem;
+      transition: border-color 0.15s ease;
+    }
+    #akd-n:focus { outline: none; border-color: #7c3aed; }
+    .akd-radio {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid #E2E8F0;
+      border-radius: 6px;
+      margin-bottom: 0.4rem;
+      cursor: pointer;
+      transition: background 0.1s ease, border-color 0.1s ease;
+    }
+    .akd-radio:hover { background: #F1F5F9; }
+    .akd-radio input[type="radio"]:checked + span { color: #6d28d9; }
+    .akd-radio:has(input:checked) {
+      border-color: #7c3aed;
+      background: #F5F3FF;
+    }
+    .akd-radio input { margin-top: 0.2rem; }
+    .akd-rules {
+      margin: 1rem 0 0;
+      padding: 0.6rem 0.8rem;
+      background: #FEF3C7;
+      border-left: 3px solid #F59E0B;
+      border-radius: 4px;
+      font-size: 0.88rem;
+      color: #78350F;
+    }
+
     .moodle-dialog-bg {
       position: fixed; top: 0; left: 0; right: 0; bottom: 0;
       background: rgba(15, 23, 42, 0.65);

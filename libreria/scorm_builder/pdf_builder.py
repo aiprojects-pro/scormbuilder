@@ -570,8 +570,12 @@ def _make_header_footer(course_title: str, topic_title: str, theme: Theme):
         canvas.rect(0, A4[1] - 1.5 * cm, A4[0], 1.5 * cm, fill=1, stroke=0)
         canvas.setFillColor(white)
         canvas.setFont(_FONT_BOLD, 9)
+        # FIX: solo mostramos el título del curso a la izquierda. Antes había
+        # `drawRightString(... topic_short)` a la derecha que duplicaba el
+        # título del tema con el que ya aparece grande en la portada y en
+        # cada cabecera de sección (h2). El topic_short queda comentado por
+        # si se necesita reactivar en el futuro.
         canvas.drawString(2 * cm, A4[1] - 1 * cm, course_short)
-        canvas.drawRightString(A4[0] - 2 * cm, A4[1] - 1 * cm, topic_short)
         canvas.setFillColor(ink)
         canvas.setFont(_FONT_REGULAR, 8)
         canvas.drawString(2 * cm, 1.2 * cm, f"Página {doc.page}")
