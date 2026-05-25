@@ -159,13 +159,19 @@ Hace:
 
 Tiempo total esperado: **5–10 minutos** (la mayoría es el build inicial).
 
-**Requisito de red durante el build**: el Containerfile descarga el RPM
-`epel-release-latest-9` desde `dl.fedoraproject.org` para habilitar EPEL
-(que es donde vive `tesseract`, no está en los repos base de UBI9). Si tu
-cluster bloquea egress hacia Fedora durante builds, opciones:
-- Crear un mirror EPEL interno y reescribir la URL del RPM.
-- O quitar tesseract del Containerfile y dejar el endpoint `/imagen-a-tabla`
-  devolviendo 503 (la app sigue funcionando, solo se pierde "Imagen→Tabla").
+**OCR (imagen→tabla) viene desactivado por defecto**: el binario `tesseract`
+no está en los repos públicos de UBI 9 y los wrappers Python (`pytesseract`,
+`opencv-python-headless`) están comentados en `deploy/requirements.txt`.
+El endpoint `/imagen-a-tabla` devuelve 503 limpio y la app funciona normal —
+el usuario puede convertir imágenes a tablas a mano cambiando el tipo de
+bloque desde el editor.
+
+Para REACTIVAR OCR (no recomendado por la alta tasa de falsos positivos):
+1. Descomenta las 3 líneas OCR en `deploy/requirements.txt`.
+2. Cambia el FROM del Containerfile de `ubi9/python-311` a `python:3.11-slim-bookworm`
+   y reemplaza el `dnf install` por `apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-spa fonts-dejavu`.
+3. Re-builda. (Pierdes compatibilidad con la SCC restricted-v2 estricta de
+   OpenShift Red Hat, pero en OKD comunitario funciona bien.)
 
 ### 4.5. Validar
 

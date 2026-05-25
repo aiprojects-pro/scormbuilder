@@ -52,18 +52,27 @@ RUN pip install /opt/app-build/libreria
 FROM registry.access.redhat.com/ubi9/python-311:latest AS runtime
 
 # Dependencias de runtime:
-#   - tesseract + tesseract-langpack-spa: OCR para "Imagen → Tabla" en editor.
-#     Vive en EPEL (no está en los repos base de UBI9). EPEL es libre y no
-#     requiere suscripción Red Hat — instalamos primero el RPM
-#     `epel-release-latest-9` desde Fedora para habilitar el repo.
 #   - dejavu-sans/serif-fonts: para que ReportLab incruste acentos en el PDF.
 #     Sin esto se cae a Helvetica y caracteres no-ASCII pueden romper.
 #   - shadow-utils: useradd/usermod (algunos scripts de entrypoint los usan).
+#
+# NOTA — OCR (imagen→tabla) desactivado:
+#   El wrapper Python `pytesseract` está COMENTADO en requirements.txt y no
+#   se importa nunca, así que tesseract no se invocaría aunque estuviera
+#   instalado. Además tesseract no está empaquetado en los repos públicos
+#   de UBI 9 (BaseOS/AppStream/CRB/EPEL-9), lo que rompía el build.
+#
+#   El endpoint `/imagen-a-tabla` devuelve 503 limpio en este modo. La app
+#   funciona normal: el usuario puede convertir imágenes a tablas a mano
+#   desde el editor cambiando el tipo de bloque.
+#
+#   Para REACTIVAR OCR en el futuro:
+#     1. Descomenta las 3 líneas de OCR en deploy/requirements.txt
+#     2. Cambia la imagen base de UBI9 a python:3.11-slim-bookworm (Debian),
+#        donde `apt-get install -y tesseract-ocr tesseract-ocr-spa` funciona.
+#     3. O bien: compila tesseract desde fuente en un stage adicional.
 USER 0
 RUN dnf install -y --setopt=tsflags=nodocs \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
-    && dnf install -y --setopt=tsflags=nodocs \
-        tesseract tesseract-langpack-spa \
         dejavu-sans-fonts dejavu-serif-fonts \
         shadow-utils \
     && dnf clean all && rm -rf /var/cache/dnf
