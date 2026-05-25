@@ -143,6 +143,32 @@ body {
 }
 
 .module-main { min-width: 0; }
+/* v0.8: párrafos justificados (alineados a izquierda Y derecha). Estándar
+   en documentos formativos / oposiciones / jurídicos en español. Usa
+   hyphens auto + word-break para evitar huecos enormes entre palabras
+   en líneas con palabras largas (typical de DOCX administrativo). */
+.module-main p,
+.module-main li,
+.module-main .callout p,
+.module-main .topic-intro p,
+.topic-body p,
+.topic-body li {
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  -ms-hyphens: auto;
+}
+/* Excepciones: pies de figura, captions, intro corto y bloques que NO
+   deben justificarse (quedan ridículos con texto corto). */
+.module-main figure figcaption,
+.module-main .quiz p,
+.module-main .inline-quiz p,
+.module-main .section-end,
+.topic-body figure figcaption {
+  text-align: left;
+  hyphens: manual;
+}
 .module-main h2 { scroll-margin-top: 1.5rem; }
 .module-main h2:not(:first-of-type) { margin-top: 4rem; }
 

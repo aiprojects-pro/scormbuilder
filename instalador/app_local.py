@@ -570,7 +570,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.6.4</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.8</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -3818,6 +3818,24 @@ def course_ai_alt_text_all(token):
                 except Exception as e:
                     errors_list.append(f"Error al persistir tras tema {ti+1}: {e}")
 
+            # v0.8: re-empaquetar SCORM al final para que los alt-text
+            # generados aparezcan en el ZIP descargable sin tener que
+            # pulsar "Guardar todo" después.
+            try:
+                _update_job(jid, current_step="Re-empaquetando SCORM con alt-text...")
+                from scorm_builder.api import course_from_dict as _cfd
+                course_obj = _cfd(data)
+                job_dir_w = Path(structure_path_str).parent
+                output_dir_w = job_dir_w / "salida"
+                unit_dirs_w = sorted(output_dir_w.glob("unidad_*")) if output_dir_w.exists() else []
+                is_batch_w = bool(unit_dirs_w)
+                single_dir_w = output_dir_w / "curso"
+                _rebuild_scorm_after_edit(course_obj, job_dir_w, output_dir_w,
+                                          unit_dirs_w, single_dir_w, is_batch_w,
+                                          errors_collector=errors_list)
+            except Exception as e:
+                errors_list.append(f"Re-empaquetado post alt-text falló: {e}")
+
             _update_job(jid, state="done", current_step="Completado",
                         result={
                             "ok": True,
@@ -4077,7 +4095,30 @@ def course_apply_enrich(token):
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    return jsonify({"applied": applied, "snapshot_id": snap_id})
+    # v0.8: re-empaquetar SCORM automáticamente para que los callouts
+    # recién aplicados aparezcan en el ZIP descargable. Antes el JSON se
+    # actualizaba pero los ZIPs en salida/ seguían siendo los viejos, y
+    # el usuario veía callouts en la vista previa pero NO al descargar.
+    rebuild_errors = []
+    try:
+        from scorm_builder.api import course_from_dict
+        course_obj = course_from_dict(data)
+        output_dir_e = job_dir / "salida"
+        unit_dirs_e = sorted(output_dir_e.glob("unidad_*")) if output_dir_e.exists() else []
+        is_batch_e = bool(unit_dirs_e)
+        single_dir_e = output_dir_e / "curso"
+        _rebuild_scorm_after_edit(course_obj, job_dir, output_dir_e,
+                                  unit_dirs_e, single_dir_e, is_batch_e,
+                                  errors_collector=rebuild_errors)
+    except Exception as e:
+        rebuild_errors.append(f"Re-empaquetado tras apply-enrich falló: {e}")
+
+    return jsonify({
+        "applied": applied,
+        "snapshot_id": snap_id,
+        "rebuilt": True,
+        "rebuild_errors": rebuild_errors,
+    })
 
 
 @app.route("/api/curso/<token>/ai-copyright", methods=["POST"])

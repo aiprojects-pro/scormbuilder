@@ -1657,7 +1657,10 @@
             courseSnapshot = JSON.parse(JSON.stringify(course));
             dirty = false;
             render();
-            setStatus('✓ ' + data.applied + ' callouts aplicados. Snapshot previo: ' + (data.snapshot_id || '—'));
+            // v0.8: el endpoint /apply-enrich ahora re-empaqueta el SCORM
+            // automáticamente, así que los callouts SÍ están en el ZIP.
+            const rebuiltMsg = (data.rebuilt === false) ? ' (recuerda pulsar Guardar todo)' : ' — listo en el ZIP descargable';
+            setStatus('✓ ' + data.applied + ' callouts aplicados' + rebuiltMsg + '. Snapshot previo: ' + (data.snapshot_id || '—'));
           }
         };
       }
