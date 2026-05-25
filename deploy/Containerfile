@@ -51,13 +51,18 @@ RUN pip install /opt/app-build/libreria
 # =====================================================================
 FROM registry.access.redhat.com/ubi9/python-311:latest AS runtime
 
-# Dependencias de runtime opcionales:
-#   - tesseract + tesseract-langpack-spa: OCR (desactivado por defecto pero
-#     disponible si el usuario activa detect_tables_in_images en una imagen).
-#   - fonts-dejavu: para que el PDF tenga acentos correctos. Sin esto cae a
-#     Helvetica y los caracteres no-ASCII pueden no renderizarse.
+# Dependencias de runtime:
+#   - tesseract + tesseract-langpack-spa: OCR para "Imagen → Tabla" en editor.
+#     Vive en EPEL (no está en los repos base de UBI9). EPEL es libre y no
+#     requiere suscripción Red Hat — instalamos primero el RPM
+#     `epel-release-latest-9` desde Fedora para habilitar el repo.
+#   - dejavu-sans/serif-fonts: para que ReportLab incruste acentos en el PDF.
+#     Sin esto se cae a Helvetica y caracteres no-ASCII pueden romper.
+#   - shadow-utils: useradd/usermod (algunos scripts de entrypoint los usan).
 USER 0
 RUN dnf install -y --setopt=tsflags=nodocs \
+        https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
+    && dnf install -y --setopt=tsflags=nodocs \
         tesseract tesseract-langpack-spa \
         dejavu-sans-fonts dejavu-serif-fonts \
         shadow-utils \

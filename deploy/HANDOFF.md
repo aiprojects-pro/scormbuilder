@@ -159,6 +159,14 @@ Hace:
 
 Tiempo total esperado: **5–10 minutos** (la mayoría es el build inicial).
 
+**Requisito de red durante el build**: el Containerfile descarga el RPM
+`epel-release-latest-9` desde `dl.fedoraproject.org` para habilitar EPEL
+(que es donde vive `tesseract`, no está en los repos base de UBI9). Si tu
+cluster bloquea egress hacia Fedora durante builds, opciones:
+- Crear un mirror EPEL interno y reescribir la URL del RPM.
+- O quitar tesseract del Containerfile y dejar el endpoint `/imagen-a-tabla`
+  devolviendo 503 (la app sigue funcionando, solo se pierde "Imagen→Tabla").
+
 ### 4.5. Validar
 
 ```bash

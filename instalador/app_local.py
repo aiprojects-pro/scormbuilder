@@ -570,7 +570,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.8</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.6.4</span></h1>
     <nav>
       {nav_links}
       {user_chip}
