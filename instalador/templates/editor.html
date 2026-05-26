@@ -962,8 +962,14 @@
           const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-tags', {topic_index: ti, n: 6});
           if (!data) return;
           course.topics[ti].tags = data.tags || [];
-          render(); markDirty();
-          setStatus('✓ ' + (data.tags || []).length + ' etiquetas generadas para el tema. Revísalas y guarda.');
+          // v0.8.1: backend ya persistió y re-empaquetó; sincronizar snapshot.
+          courseSnapshot = JSON.parse(JSON.stringify(course));
+          dirty = false;
+          render();
+          const tailMsg = (data.rebuilt === false)
+            ? '. Pulsa Guardar todo para reempaquetar.'
+            : ' — listo en el ZIP descargable.';
+          setStatus('✓ ' + (data.tags || []).length + ' etiquetas generadas' + tailMsg);
         };
       });
 
@@ -994,9 +1000,16 @@
           const r2 = await fetch('/api/curso/' + TOKEN + '/structure');
           if (r2.ok) {
             course = await r2.json();
-            render(); markDirty();
+            courseSnapshot = JSON.parse(JSON.stringify(course));
+            dirty = false;  // backend ya persistió y re-empaquetó
+            render();
             const inlineGen = Object.values(data.by_subsection_count || {}).reduce((s, n) => s + n, 0);
-            setStatus('✓ Quiz generado: ' + data.final_count + ' del bloque final + ' + inlineGen + ' intercaladas. Guarda para reempaquetar.');
+            // v0.8.1: el backend ya re-empaqueta automáticamente al final.
+            // Si el rebuild devolvió rebuilt:true, NO pedimos "Guarda".
+            const tailMsg = (data.rebuilt === false)
+              ? ' (recuerda pulsar Guardar todo para reempaquetar).'
+              : ' — listo en el ZIP descargable.';
+            setStatus('✓ Quiz generado: ' + data.final_count + ' del bloque final + ' + inlineGen + ' intercaladas' + tailMsg);
           }
         };
       });

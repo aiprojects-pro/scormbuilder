@@ -3365,7 +3365,15 @@ def course_ai_tags(token):
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    return jsonify({"tags": tags})
+    # v0.8.1: re-empaquetar el SCORM para que los chips de tags aparezcan
+    # en el HTML descargado (las tags se renderizan bajo el título del tema).
+    rebuild_ok, rebuild_errors = _rebuild_scorm_from_structure(structure_path)
+
+    return jsonify({
+        "tags": tags,
+        "rebuilt": rebuild_ok,
+        "rebuild_errors": rebuild_errors,
+    })
 
 
 @app.route("/api/curso/<token>/ai-alt-text", methods=["POST"])
@@ -4187,11 +4195,27 @@ def _rebuild_scorm_after_edit(course, job_dir, output_dir, unit_dirs, single_dir
 
     if is_batch:
         # Una unidad por tema, recursos locales en unidad_XX/recursos
+        # v0.8.1: BUG fix — la carpeta unidad_NN se nombra por `topic.number`
+        # (el número real del tema), no por el índice secuencial. Cuando el
+        # usuario sube 3 docx para T7/T8/T9, las carpetas son unidad_07/
+        # unidad_08/unidad_09 (no unidad_01/02/03). Antes hacíamos `ti+1`
+        # y el matching fallaba silenciosamente → los ZIPs viejos sin
+        # callouts ni quiz quedaban en disco.
         for ti, topic_obj in enumerate(course.topics):
-            idx_str = f"{ti+1:02d}"
+            idx_str = f"{topic_obj.number:02d}"
             matching = [d for d in unit_dirs
                         if d.name.startswith(f"unidad_{idx_str}_")]
             if not matching:
+                # Fallback: probar por índice secuencial por compatibilidad
+                # con cursos creados antes del fix (donde unidad_NN sí usaba ti+1).
+                idx_fallback = f"{ti+1:02d}"
+                matching = [d for d in unit_dirs
+                            if d.name.startswith(f"unidad_{idx_fallback}_")]
+            if not matching:
+                errors_collector.append(
+                    f"Rebuild T{topic_obj.number}: no se encuentra "
+                    f"unidad_{idx_str}_* en {output_dir}"
+                )
                 continue
             unit_dir = matching[0]
             unit_scorm_dir = unit_dir / "scorm"
@@ -4345,6 +4369,43 @@ def _collect_download_filenames(course, recursos_dir: Optional[Path] = None):
                                 pass
                 break
     return pdf_filenames, audio_filenames
+
+
+def _rebuild_scorm_from_structure(structure_path, errors=None):
+    """Helper conveniencia: relee structure.json y re-empaqueta el SCORM.
+
+    Encapsula el patrón "el endpoint AI mutó structure.json → reflejarlo en
+    el ZIP descargable". Detecta automáticamente batch vs single y llama a
+    `_rebuild_scorm_after_edit`.
+
+    USO: cualquier endpoint AI que escriba a structure.json debe llamar a
+    este helper al final para que los cambios aparezcan inmediatamente al
+    descargar el SCORM (sin tener que pulsar "Guardar todo").
+
+    Devuelve (ok: bool, errors: list[str]).
+    """
+    if errors is None:
+        errors = []
+    try:
+        from scorm_builder.api import course_from_dict
+        structure_path = Path(structure_path)
+        with open(structure_path, encoding="utf-8") as f:
+            data = json.load(f)
+        course_obj = course_from_dict(data)
+        job_dir = structure_path.parent
+        output_dir = job_dir / "salida"
+        unit_dirs = sorted(output_dir.glob("unidad_*")) if output_dir.exists() else []
+        is_batch = bool(unit_dirs)
+        single_dir = output_dir / "curso"
+        _rebuild_scorm_after_edit(
+            course_obj, job_dir, output_dir,
+            unit_dirs, single_dir, is_batch,
+            errors_collector=errors,
+        )
+        return (not errors), errors
+    except Exception as e:
+        errors.append(f"Re-empaquetado tras edición IA falló: {e}")
+        return False, errors
 
 
 @app.route("/api/curso/<token>/export-cmi5", methods=["POST"])
@@ -4705,10 +4766,18 @@ def course_ai_quiz_config(token):
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+    # v0.8.1: re-empaquetar el SCORM para que el quiz mixto (MC + V/F +
+    # huecos) aparezca en el ZIP descargable. Antes, el JSON se actualizaba
+    # pero los ZIPs en salida/ seguían siendo los viejos y el usuario veía
+    # el quiz en la vista previa pero NO al descargar.
+    rebuild_ok, rebuild_errors = _rebuild_scorm_from_structure(structure_path)
+
     return jsonify({
         "final_count": len(result["final"]),
         "by_subsection_count": {k: len(v) for k, v in result["by_subsection"].items()},
         "result": result,
+        "rebuilt": rebuild_ok,
+        "rebuild_errors": rebuild_errors,
     })
 
 
