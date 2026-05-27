@@ -44,11 +44,16 @@
             <div id="moodleTestResult" class="moodle-test-result" style="display:none;"></div>
           </div>
           <h4>Paquetes SCORM a subir</h4>
+          <p style="color:#374151;font-size:0.85rem;margin:0.3rem 0 0.6rem;">
+            Cada checkbox marcado se subirá a Moodle como un módulo SCORM
+            INDEPENDIENTE (no como un único paquete). Desmarca las unidades
+            que no quieras subir.
+          </p>
           <div id="moodleUnitsList" class="moodle-units-list">
             <p style="color:#6b7280;font-style:italic;">Cargando lista...</p>
           </div>
           <div class="moodle-upload-actions">
-            <button class="btn" onclick="startMoodleUpload()">📤 Subir los SCORMs seleccionados</button>
+            <button class="btn" onclick="startMoodleUpload()">📤 Subir los SCORMs seleccionados (uno por uno)</button>
           </div>
           <div id="moodleUploadResult"></div>
         </div>
@@ -284,7 +289,14 @@
         const du = await ru.json();
         const ul = document.getElementById('moodleUnitsList');
         if (du.units && du.units.length) {
-          ul.innerHTML = du.units.map(u =>
+          let header = '';
+          if (du.units.length === 1) {
+            header = '<p style="color:#92400E;background:#FEF3C7;padding:0.5rem;border-radius:6px;margin:0 0 0.6rem;font-size:0.85rem;">' +
+                     '⚠ Este curso solo genera 1 paquete SCORM. Si quieres subir cada ' +
+                     'tema como módulo independiente a Moodle, vuelve a la página inicial ' +
+                     'y sube un Word POR TEMA (modo batch).</p>';
+          }
+          ul.innerHTML = header + du.units.map(u =>
             '<label class="moodle-unit-row">' +
             '<input type="checkbox" class="moodle-unit-cb" data-idx="' + u.unit_index + '" checked> ' +
             '<span>' + escapeHtml(u.name) + '</span>' +
@@ -1135,6 +1147,30 @@
       // Moodle. La importación al banco de preguntas sigue siendo manual
       // (Moodle no expone API REST estándar para Aiken).
       bindAct('aiken-moodle', async (btn) => {
+          // v0.8.2: pre-check si hay Moodle configurado. Si no, ofrecer abrir
+          // el diálogo de configuración antes de subir los Aiken.
+          let cfgOk = false;
+          try {
+            const cfgRes = await fetch('/api/curso/' + TOKEN + '/moodle-config');
+            if (cfgRes.ok) {
+              const cfgData = await cfgRes.json();
+              cfgOk = !!(cfgData && cfgData.moodle_url && cfgData.moodle_token);
+            }
+          } catch (e) { /* sigue al fallback */ }
+          if (!cfgOk) {
+            if (confirm(
+                'No hay Moodle configurado para este curso.\n\n' +
+                '¿Quieres configurarlo ahora? Se abrirá el diálogo donde\n' +
+                'puedes introducir la URL de Moodle y el token de servicios web.'
+            )) {
+              if (typeof openMoodleDialog === 'function') {
+                openMoodleDialog();
+              } else {
+                alert('Pulsa el botón "Subir a Moodle" para configurar primero.');
+              }
+            }
+            return;
+          }
           if (!confirm(
               'Esto subirá los bancos Aiken (.txt) a "Archivos privados" de tu Moodle.\n\n' +
               'Después, EN MOODLE, tendrás que importarlos manualmente:\n' +
@@ -1152,7 +1188,15 @@
             });
             const data = await res.json();
             if (!res.ok) {
-              alert((data.error || 'Error desconocido'));
+              // Si el endpoint sigue diciendo "No hay Moodle configurado"
+              // (race entre el check y el upload), ofrecer config también.
+              if ((data.error || '').toLowerCase().indexOf('moodle configurado') >= 0) {
+                if (confirm(data.error + '\n\n¿Configurar ahora?')) {
+                  if (typeof openMoodleDialog === 'function') openMoodleDialog();
+                }
+              } else {
+                alert(data.error || 'Error desconocido');
+              }
               return;
             }
             let msg = '✓ Subida Aiken a Moodle:\n\n';

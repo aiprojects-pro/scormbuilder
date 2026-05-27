@@ -54,36 +54,65 @@ def _find_font(candidates: List[str]) -> Optional[str]:
 
 
 def _register_unicode_fonts() -> None:
-    """Registra fuentes con soporte Unicode. Idempotente."""
+    """Registra fuentes con soporte Unicode. Idempotente.
+
+    v0.8.2: BUG FIX — en UBI9/RHEL9, el paquete `dejavu-sans-fonts` instala
+    los TTFs en `/usr/share/fonts/dejavu-sans-fonts/` (no en `/dejavu/`),
+    así que buscábamos en la ruta equivocada y caíamos a Helvetica → los
+    acentos se renderizaban como ■. Ahora hacemos una búsqueda RECURSIVA
+    en /usr/share/fonts y rutas similares para no depender del nombre
+    exacto del directorio que use cada distribución.
+    """
     global _FONTS_REGISTERED, _FONT_REGULAR, _FONT_BOLD, _FONT_ITALIC, _FONT_BOLDITALIC
     if _FONTS_REGISTERED:
         return
 
-    common_dirs = [
-        "/usr/share/fonts/truetype/dejavu",
-        "/usr/share/fonts/dejavu",
-        "/usr/share/fonts/TTF",
-        "/usr/share/fonts/truetype/liberation",
-        "/usr/share/fonts/liberation",
-        "/usr/share/fonts/truetype/noto",
-        "/usr/share/fonts/noto",
-        "/Library/Fonts",
-        "/System/Library/Fonts",
-        "C:\\Windows\\Fonts",
+    common_roots = [
+        "/usr/share/fonts",                # Linux (RHEL, Debian, Arch...)
+        "/usr/local/share/fonts",          # Linux custom
+        "/Library/Fonts",                  # macOS
+        "/System/Library/Fonts",           # macOS sistema
+        "/System/Library/Fonts/Supplemental",  # macOS Catalina+
+        "C:\\Windows\\Fonts",              # Windows
     ]
-    cand_r = [os.path.join(d, n) for d in common_dirs for n in
-              ("DejaVuSans.ttf", "LiberationSans-Regular.ttf", "NotoSans-Regular.ttf", "Arial.ttf", "arial.ttf")]
-    cand_b = [os.path.join(d, n) for d in common_dirs for n in
-              ("DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "NotoSans-Bold.ttf", "arialbd.ttf")]
-    cand_i = [os.path.join(d, n) for d in common_dirs for n in
-              ("DejaVuSans-Oblique.ttf", "LiberationSans-Italic.ttf", "NotoSans-Italic.ttf", "ariali.ttf")]
-    cand_bi = [os.path.join(d, n) for d in common_dirs for n in
-               ("DejaVuSans-BoldOblique.ttf", "LiberationSans-BoldItalic.ttf", "NotoSans-BoldItalic.ttf", "arialbi.ttf")]
+    # Búsqueda recursiva: encontramos los TTF de DejaVu/Liberation/Noto
+    # sin importar en qué subdirectorio específico viva el paquete.
+    target_names = {
+        "regular":    ["DejaVuSans.ttf", "LiberationSans-Regular.ttf",
+                       "NotoSans-Regular.ttf", "Arial.ttf", "arial.ttf"],
+        "bold":       ["DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf",
+                       "NotoSans-Bold.ttf", "arialbd.ttf"],
+        "italic":     ["DejaVuSans-Oblique.ttf", "LiberationSans-Italic.ttf",
+                       "NotoSans-Italic.ttf", "ariali.ttf"],
+        "bolditalic": ["DejaVuSans-BoldOblique.ttf", "LiberationSans-BoldItalic.ttf",
+                       "NotoSans-BoldItalic.ttf", "arialbi.ttf"],
+    }
+    found = {"regular": None, "bold": None, "italic": None, "bolditalic": None}
 
-    fr = _find_font(cand_r)
-    fb = _find_font(cand_b)
-    fi = _find_font(cand_i)
-    fbi = _find_font(cand_bi)
+    for root in common_roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                file_set = set(files)
+                for variant, names in target_names.items():
+                    if found[variant]:
+                        continue
+                    for name in names:
+                        if name in file_set:
+                            found[variant] = os.path.join(dirpath, name)
+                            break
+                if all(found.values()):
+                    break
+        except OSError:
+            continue
+        if all(found.values()):
+            break
+
+    fr = found["regular"]
+    fb = found["bold"]
+    fi = found["italic"]
+    fbi = found["bolditalic"]
 
     if fr:
         try:
@@ -193,6 +222,89 @@ def _strip_html_for_pdf(text: str) -> str:
     return s
 
 
+def _compute_image_tint(theme) -> Optional[tuple]:
+    """v0.8.2: calcula (hue_rotate_deg, saturate_factor) para retintar
+    imágenes del DOCX hacia la paleta del tema. Misma lógica que
+    `renderer._image_tint_css` para que SCORM y PDF salgan parecidos.
+
+    Returns:
+        (rotate_deg: int, sat_factor: float) o None si no procede tintar
+        (paleta inválida o gris puro).
+    """
+    primary = (getattr(theme, "primary", "") or "").lstrip("#")
+    if len(primary) != 6:
+        return None
+    try:
+        r = int(primary[0:2], 16) / 255.0
+        g = int(primary[2:4], 16) / 255.0
+        b = int(primary[4:6], 16) / 255.0
+    except ValueError:
+        return None
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx == mn:
+        return None
+    if mx == r:
+        h = ((g - b) / (mx - mn)) % 6
+    elif mx == g:
+        h = (b - r) / (mx - mn) + 2
+    else:
+        h = (r - g) / (mx - mn) + 4
+    h_deg = round(h * 60)
+    l = (mx + mn) / 2.0
+    s = (mx - mn) / (1 - abs(2 * l - 1)) if l not in (0, 1) else 0
+    rotate = (h_deg - 220) % 360  # DOCX azul base 220
+    if rotate > 180:
+        rotate -= 360
+    sat_factor = max(0.5, min(1.8, s * 1.6 + 0.5))
+    return rotate, sat_factor
+
+
+def _retint_image_for_palette(img_path: Path, theme, cache_dir: Path) -> Path:
+    """v0.8.2: aplica hue-rotate + saturate a una imagen vía Pillow.
+    Guarda el resultado en `cache_dir` con sufijo `.tinted.png` y devuelve
+    la nueva ruta. Si Pillow no está disponible o la imagen no es procesable,
+    devuelve la ruta original sin tocar.
+
+    El retintado se hace UNA VEZ por imagen+tema (se cachea por nombre).
+    """
+    tint = _compute_image_tint(theme)
+    if tint is None:
+        return img_path
+    rotate_deg, sat_factor = tint
+    try:
+        from PIL import Image
+        import colorsys
+    except ImportError:
+        return img_path
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tinted_path = cache_dir / f"{img_path.stem}__tint_{rotate_deg}_{int(sat_factor*100)}.png"
+        if tinted_path.exists():
+            return tinted_path
+        im = Image.open(img_path).convert("RGBA")
+        pixels = im.load()
+        w, h = im.size
+        rot_norm = (rotate_deg % 360) / 360.0
+        for y in range(h):
+            for x in range(w):
+                pr, pg, pb, pa = pixels[x, y]
+                if pa == 0:
+                    continue
+                # RGB → HSV
+                ph, ps, pv = colorsys.rgb_to_hsv(pr/255.0, pg/255.0, pb/255.0)
+                # Rotar hue + ajustar saturación
+                ph = (ph + rot_norm) % 1.0
+                ps = max(0.0, min(1.0, ps * sat_factor))
+                # HSV → RGB
+                nr, ng, nb = colorsys.hsv_to_rgb(ph, ps, pv)
+                pixels[x, y] = (int(nr*255), int(ng*255), int(nb*255), pa)
+        im.save(tinted_path, format="PNG", optimize=True)
+        return tinted_path
+    except Exception as e:
+        logger.warning(f"No se pudo retintar imagen {img_path.name}: {e}")
+        return img_path
+
+
 def _resolve_image_path(src: str, recursos_dir: Optional[Path]) -> Optional[Path]:
     """Resuelve la ruta real de una imagen para incluirla en el PDF.
 
@@ -280,6 +392,14 @@ def _block_to_elements(
         src = (block.extras or {}).get("src", "") or (block.extras or {}).get("file", "")
         img_path = _resolve_image_path(src, recursos_dir)
         if img_path:
+            # v0.8.2: retintar la imagen hacia la paleta del tema (la misma
+            # transformación que aplica el SCORM vía hue-rotate + saturate).
+            # Cachea el resultado en `recursos/_tinted/` para no rehacer
+            # el procesamiento en sucesivas generaciones del PDF.
+            no_tint = bool((block.extras or {}).get("no_tint"))
+            if not no_tint and recursos_dir:
+                cache_dir = Path(recursos_dir) / "_tinted"
+                img_path = _retint_image_for_palette(img_path, theme, cache_dir)
             try:
                 from PIL import Image as PILImage
                 with PILImage.open(img_path) as im:
@@ -624,10 +744,9 @@ def build_pdf(
             f"<b>Autor/entidad:</b> {_strip_html_for_pdf(course.metadata.author)}",
             styles["body"],
         ))
-    story.append(Paragraph(
-        "Apuntes de consulta del tema. Material formativo complementario al curso e-learning.",
-        styles["body"],
-    ))
+    # v0.8.2: quitado el subtítulo "Apuntes de consulta del tema. Material
+    # formativo complementario al curso e-learning." a petición del usuario.
+    # La portada queda con título grande + intro + autor, sin esa línea.
     story.append(PageBreak())
 
     # Índice

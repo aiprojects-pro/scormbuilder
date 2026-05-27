@@ -49,11 +49,17 @@ def _load_scorm_api_js() -> str:
 # ============================================================
 
 def _image_tint_css(theme: Theme) -> str:
-    """v0.5.7: filtro CSS aproximado para retintar las imágenes embebidas
-    del DOCX (cajas azules, tablas con color) hacia el color de la paleta.
+    """v0.5.7: filtro CSS para retintar las imágenes embebidas del DOCX
+    (cajas con color, recuadros, tablas) hacia el color de la paleta.
 
-    El docx típico usa azul ~hue 220. Calculamos el delta entre ese hue base
-    y el del color primary del tema, y aplicamos hue-rotate.
+    v0.8.2 BUG FIX: antes había un threshold `if abs(rotate) < 12: return ""`
+    que cortaba el filtro cuando la paleta era azul (hue cercano al 220 del
+    DOCX). El usuario seleccionaba "paleta azul" y las imágenes seguían con
+    el tono original del Word, sin acercarse al azul corporativo de la paleta.
+    Ahora el filtro SE APLICA SIEMPRE (excepto para tonos grises puros), y
+    además combinamos `hue-rotate` con `saturate` para empujar el tono hacia
+    la saturación del primary del tema — así dos azules distintos terminan
+    pareciéndose visualmente, no solo el hue.
 
     Las imágenes con class 'no-tint' o atributo data-no-tint quedan sin tocar
     (fotografías, ilustraciones reales que no deben cambiar).
@@ -70,6 +76,7 @@ def _image_tint_css(theme: Theme) -> str:
     mx, mn = max(r, g, b), min(r, g, b)
     if mx == mn:
         return ""  # gris puro: sin filtro
+    # Hue (0..360)
     if mx == r:
         h = ((g - b) / (mx - mn)) % 6
     elif mx == g:
@@ -77,19 +84,28 @@ def _image_tint_css(theme: Theme) -> str:
     else:
         h = (r - g) / (mx - mn) + 4
     h_deg = round(h * 60)
+    # Saturation (0..1) — HSL
+    l = (mx + mn) / 2.0
+    s = (mx - mn) / (1 - abs(2 * l - 1)) if l not in (0, 1) else 0
+    # DOCX blue base: ~hue 220, saturación ~0.5 (Microsoft Word default)
     base_blue_hue = 220
     rotate = (h_deg - base_blue_hue) % 360
     if rotate > 180:
         rotate -= 360
-    if abs(rotate) < 12:
-        return ""
+    # v0.8.2: factor de saturación: empuja imágenes hacia la saturación de
+    # la paleta. Si la paleta es muy saturada (s≈0.8, azul corporativo brillante)
+    # multiplicamos saturación. Si la paleta es desaturada (s≈0.3, pasteles)
+    # la reducimos. Rango razonable: 0.5 a 1.8.
+    sat_factor = max(0.5, min(1.8, s * 1.6 + 0.5))
     return f"""
-/* v0.5.7: retintado aproximado de imágenes embebidas del DOCX hacia la paleta.
-   Para evitarlo en una imagen concreta: añade class="no-tint" o data-no-tint. */
+/* v0.8.2: retintado de imágenes embebidas del DOCX hacia la paleta.
+   Combina hue-rotate ({rotate}deg) con saturate ({sat_factor:.2f}) para
+   acercar la apariencia al primary del tema. Para excluir una imagen
+   concreta: añade class="no-tint" o data-no-tint. */
 .topic-body img:not(.no-tint):not([data-no-tint]),
 .module-content img:not(.no-tint):not([data-no-tint]),
 main img:not(.no-tint):not([data-no-tint]) {{
-  filter: hue-rotate({rotate}deg);
+  filter: hue-rotate({rotate}deg) saturate({sat_factor:.2f});
 }}
 """
 

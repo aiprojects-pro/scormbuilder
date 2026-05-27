@@ -4298,11 +4298,35 @@ def _rebuild_scorm_after_edit(course, job_dir, output_dir, unit_dirs, single_dir
         except Exception as e:
             errors_collector.append(f"Rebuild single: {e}")
 
-    # Re-comprimir el ZIP descargable del curso
+    # Re-comprimir el ZIP descargable del curso.
+    #
+    # v0.8.2 BUG FIX CRÍTICO: el nombre del ZIP descargable debe COINCIDIR
+    # con `courses.zip_path` de la DB, si no, el endpoint /api/descargar
+    # sigue sirviendo el archivo ORIGINAL (sin las mejoras IA aplicadas).
+    #
+    # Antes hacíamos `job_dir.name.split("_", 1)[-1]` asumiendo que el job_dir
+    # era "TIMESTAMP_token" con un único `_`. Pero el job_dir real es
+    # "YYYYMMDD_HHMMSS_uuid" (DOS guiones bajos), así que split[-1] daba sólo
+    # "HHMMSS_uuid" y el rebuild creaba `curso_HHMMSS_uuid.zip` distinto del
+    # original `curso_YYYYMMDD_HHMMSS_uuid.zip`. El usuario descargaba SIEMPRE
+    # el original sin las mejoras IA.
+    #
+    # Solución robusta: BUSCAR el zip existente `curso_*.zip` en job_dir.
+    # Si hay uno, lo sobrescribimos. Si no, lo creamos con el nombre completo
+    # del job_dir como token (cubre cursos nuevos sin DB entry todavía).
     job_dir_p = Path(job_dir)
-    token_from_dir = job_dir_p.name.split("_", 1)[-1] if "_" in job_dir_p.name else job_dir_p.name
-    final_zip = job_dir_p / f"curso_{token_from_dir}.zip"
-    # No lo borramos forzosamente: solo si vamos a recrear
+    existing_zips = sorted(job_dir_p.glob("curso_*.zip"))
+    # Filtrar variantes auxiliares (html_standalone, scorm2004…) — el ZIP
+    # principal es el que NO tiene esos sufijos.
+    main_zips = [z for z in existing_zips
+                 if not any(z.stem.endswith(suf) for suf in
+                            ("_html_standalone", "_scorm2004", "_imscp", "_cmi5"))]
+    if main_zips:
+        final_zip = main_zips[0]  # ZIP principal existente → lo sobrescribimos
+    else:
+        # Fallback: usar el nombre completo del job_dir como token
+        final_zip = job_dir_p / f"curso_{job_dir_p.name}.zip"
+
     if final_zip.exists():
         try:
             final_zip.unlink()
@@ -4823,12 +4847,17 @@ def course_export_imscp(token):
     if output_dir.exists():
         unit_dirs = sorted(output_dir.glob("unidad_*"))
         if unit_dirs:
-            # Modo batch: consolidamos imágenes de TODAS las unidades en una temporal
+            # Modo batch: consolidamos imágenes/audios/PDFs de TODAS las
+            # unidades en una temporal.
+            # v0.8.2 BUG FIX: antes solo copiábamos de `unidad/recursos/`,
+            # pero los PDFs viven en `unidad/pdfs/` y no llegaban al IMS CP,
+            # haciendo que faltase el .pdf descargable que sí tiene el SCORM.
             consolidated_recursos = course_dir / "_imscp_recursos_tmp"
             if consolidated_recursos.exists():
                 shutil.rmtree(consolidated_recursos)
             consolidated_recursos.mkdir(parents=True)
             for ud in unit_dirs:
+                # 1) imágenes + audios viven en recursos/
                 ur = ud / "recursos"
                 if ur.exists():
                     for f in ur.iterdir():
@@ -4837,9 +4866,27 @@ def course_export_imscp(token):
                                 shutil.copy2(f, consolidated_recursos / f.name)
                             except Exception:
                                 pass
+                # 2) PDFs viven en pdfs/  ← v0.8.2 ahora también incluidos
+                upd = ud / "pdfs"
+                if upd.exists():
+                    for f in upd.glob("apuntes_T*.pdf"):
+                        try:
+                            shutil.copy2(f, consolidated_recursos / f.name)
+                        except Exception:
+                            pass
             recursos_arg = consolidated_recursos
         elif (output_dir / "curso" / "recursos").exists():
             recursos_arg = output_dir / "curso" / "recursos"
+            # v0.8.2: en modo single, también copiar PDFs de salida/curso/pdfs/
+            single_pdfs = output_dir / "curso" / "pdfs"
+            if single_pdfs.exists():
+                for f in single_pdfs.glob("apuntes_T*.pdf"):
+                    dst = recursos_arg / f.name
+                    if not dst.exists():
+                        try:
+                            shutil.copy2(f, dst)
+                        except Exception:
+                            pass
 
     # Ahora SÍ tenemos recursos_arg: renderizamos con los filenames detectados
     # para que el HTML incluya los botones de descarga (PDF + audio).
