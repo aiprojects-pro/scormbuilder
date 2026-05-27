@@ -570,7 +570,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.6.4</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.8.3</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -4456,14 +4456,59 @@ def course_export_cmi5(token):
     course = course_from_dict(data)
     theme = get_theme(course.metadata.palette)
     course_dir = Path(row["zip_path"]).parent
-    recursos_dir = course_dir / "recursos"
-    recursos_arg = recursos_dir if recursos_dir.exists() else None
+    output_dir = course_dir / "salida"
+    # v0.8.3 BUG FIX: antes buscaba sólo `course_dir/recursos` que no existe en
+    # batch ni en single (las imágenes viven en `salida/unidad_NN/recursos/` o
+    # en `salida/curso/recursos/`). Por eso el cmi5 salía sin imágenes.
+    # Ahora consolidamos en un tmpdir como hace IMS CP.
+    recursos_arg = None
+    consolidated_recursos = None
+    if output_dir.exists():
+        unit_dirs = sorted(output_dir.glob("unidad_*"))
+        if unit_dirs:
+            consolidated_recursos = course_dir / "_cmi5_recursos_tmp"
+            if consolidated_recursos.exists():
+                shutil.rmtree(consolidated_recursos)
+            consolidated_recursos.mkdir(parents=True)
+            for ud in unit_dirs:
+                ur = ud / "recursos"
+                if ur.exists():
+                    for f in ur.iterdir():
+                        if f.is_file():
+                            try:
+                                shutil.copy2(f, consolidated_recursos / f.name)
+                            except Exception:
+                                pass
+                upd = ud / "pdfs"
+                if upd.exists():
+                    for f in upd.glob("apuntes_T*.pdf"):
+                        try:
+                            shutil.copy2(f, consolidated_recursos / f.name)
+                        except Exception:
+                            pass
+            recursos_arg = consolidated_recursos
+        elif (output_dir / "curso" / "recursos").exists():
+            recursos_arg = output_dir / "curso" / "recursos"
+            single_pdfs = output_dir / "curso" / "pdfs"
+            if single_pdfs.exists():
+                for f in single_pdfs.glob("apuntes_T*.pdf"):
+                    dst = recursos_arg / f.name
+                    if not dst.exists():
+                        try:
+                            shutil.copy2(f, dst)
+                        except Exception:
+                            pass
+
     pdf_filenames, audio_filenames = _collect_download_filenames(course, recursos_arg)
     htmls = render_html(course, theme,
                        pdf_filenames=pdf_filenames or None,
                        audio_filenames=audio_filenames or None)
     out_zip = course_dir / "curso_cmi5.zip"
-    export_cmi5(course, htmls, out_zip, recursos_dir=recursos_arg)
+    try:
+        export_cmi5(course, htmls, out_zip, recursos_dir=recursos_arg)
+    finally:
+        if consolidated_recursos and consolidated_recursos.exists():
+            shutil.rmtree(consolidated_recursos, ignore_errors=True)
     return jsonify({"ok": True, "filename": out_zip.name})
 
 
@@ -4936,6 +4981,11 @@ def course_ai_aiken_extendido(token):
     complexity = str(payload.get("complexity", "mixto")).strip().lower()
     if complexity not in ("basico", "intermedio", "avanzado", "mixto"):
         complexity = "mixto"
+    # v0.8.3: nº de opciones (respuestas) por pregunta. Default 4, rango 2-6.
+    try:
+        n_options = max(2, min(6, int(payload.get("n_options", 4))))
+    except (TypeError, ValueError):
+        n_options = 4
 
     with open(structure_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -4950,6 +5000,7 @@ def course_ai_aiken_extendido(token):
         course, aiken_dir,
         n_questions_per_topic=n,
         complexity=complexity,
+        n_options=n_options,
     )
     if not files:
         # v0.7.1: diagnóstico más informativo. Las causas habituales son:
@@ -5679,9 +5730,12 @@ def course_tts(token):
                         # como bloque [AUDIO] desde el editor.
                         topic["audio_filename"] = filename
                     else:
-                        errors.append(f"T{ti+1}: TTS devolvió None")
+                        # v0.8.3: reportar la causa real (no el genérico "None").
+                        from scorm_builder.tts import last_error as _tts_last_error
+                        real_err = _tts_last_error() or "motor TTS sin razón concreta"
+                        errors.append(f"T{ti+1}: {real_err}")
                 except Exception as e:
-                    errors.append(f"T{ti+1}: {e}")
+                    errors.append(f"T{ti+1}: {type(e).__name__}: {e}")
                     if len(errors) >= 10:
                         errors.append("(abortado por demasiados errores)")
                         break

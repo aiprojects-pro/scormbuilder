@@ -80,6 +80,13 @@ def synthesize(
     if not text:
         return None
 
+    # v0.8.3: rastreamos los errores reales para que el caller pueda
+    # propagarlos al usuario en lugar del genérico "TTS devolvió None".
+    # Adjuntamos en `_last_synthesize_error` (thread-local-safe vía atributo
+    # del módulo) la causa exacta.
+    global _last_synthesize_error
+    _last_synthesize_error = None
+
     # 1) Intentar gTTS primero (motor preferido)
     if _gtts_available():
         try:
@@ -92,9 +99,14 @@ def synthesize(
             tts.save(str(output_audio))
             if output_audio.exists() and output_audio.stat().st_size > 0:
                 return output_audio
-            logger.warning(f"gTTS escribió archivo vacío: {output_audio}")
+            _last_synthesize_error = f"gTTS escribió archivo vacío: {output_audio}"
+            logger.warning(_last_synthesize_error)
         except Exception as e:
-            logger.warning(f"gTTS falló: {e}; intentando pyttsx3...")
+            # gTTS suele fallar por bloqueo de red al endpoint de Google
+            # (translate.google.com). En OKD detrás de un proxy hay que
+            # autorizar egress a *.google.com:443 o usar pyttsx3 offline.
+            _last_synthesize_error = f"gTTS falló: {type(e).__name__}: {e}"
+            logger.warning(f"{_last_synthesize_error}; intentando pyttsx3...")
 
     # 2) Fallback a pyttsx3 (offline)
     if _pyttsx3_available():
@@ -124,9 +136,25 @@ def synthesize(
             if output_audio.exists() and output_audio.stat().st_size > 0:
                 return output_audio
         except Exception as e:
+            _last_synthesize_error = (_last_synthesize_error or "") + f" | pyttsx3 falló: {type(e).__name__}: {e}"
             logger.warning(f"pyttsx3 falló: {e}")
+    elif _last_synthesize_error is None:
+        _last_synthesize_error = (
+            "Ningún motor TTS disponible: instala `gtts` (requiere salida HTTPS "
+            "a translate.google.com) o `pyttsx3` (offline con espeak/sapi5)."
+        )
 
     return None
+
+
+# v0.8.3: variable a nivel de módulo para que el worker pueda recuperar la
+# última causa exacta del fallo de synthesize() (en lugar de "devolvió None").
+_last_synthesize_error: Optional[str] = None
+
+
+def last_error() -> Optional[str]:
+    """Devuelve el último error reportado por `synthesize()` o None."""
+    return _last_synthesize_error
 
 
 def subsection_to_text(subsection) -> str:

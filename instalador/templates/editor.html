@@ -1033,17 +1033,21 @@
       bindAct('aiken-ext', async (btn) => {
           const config = await openAikenConfigDialog();
           if (!config) return;   // cancelado
-          const {n, complexity} = config;
-          if (!confirm('Esto pedirá a la IA ' + n + ' preguntas por tema, nivel "' + complexity + '". Puede tardar varios minutos. ¿Continuar?')) return;
+          const {n, complexity, n_options} = config;
+          if (!confirm('Esto pedirá a la IA ' + n + ' preguntas por tema (' + n_options +
+                       ' opciones por pregunta), nivel "' + complexity +
+                       '". Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
           const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-aiken-extendido',
-                                     {n: n, complexity: complexity});
+                                     {n: n, complexity: complexity, n_options: n_options});
           if (!data) return;
           const list = (data.files || []).map(f => '• ' + f).join('\n');
-          alert('✓ Banco Aiken extendido generado (' + n + ' preg/tema, nivel ' + complexity + '):\n\n' + list +
+          alert('✓ Banco Aiken extendido generado (' + n + ' preg/tema × ' + n_options +
+                ' opciones, nivel ' + complexity + '):\n\n' + list +
                 '\n\nLos archivos están en la carpeta del curso (aiken_extendido/). ' +
                 'Cuando guardes el curso se incluirán en el ZIP descargable.');
-          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken (' + complexity + ', ' + n + ' preg) generados.');
+          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken (' + complexity + ', ' + n +
+                    ' preg × ' + n_options + ' opciones) generados.');
         });
 
     // Modal de configuración Aiken. Devuelve {n, complexity} o null si cancela.
@@ -1063,6 +1067,11 @@
                 '<input type="number" id="akd-n" min="10" max="60" step="1" value="30">' +
                 '<span class="akd-hint">Mínimo 10, máximo 60. Si la IA no consigue generar al menos 10 válidas para un tema, ese tema se omite y aparece un aviso.</span>' +
               '</label>' +
+              '<label class="akd-field">' +
+                '<span class="akd-label">Nº de respuestas (opciones) por pregunta</span>' +
+                '<input type="number" id="akd-nopts" min="2" max="6" step="1" value="4">' +
+                '<span class="akd-hint">Default 4 (A, B, C, D). Rango 2-6. Solo una correcta por pregunta.</span>' +
+              '</label>' +
               '<fieldset class="akd-field">' +
                 '<legend class="akd-label">Nivel de complejidad (taxonomía de Bloom)</legend>' +
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="basico"><span><strong>Básico</strong> — recuerdo y comprensión. Preguntas tipo "¿Qué es...?".</span></label>' +
@@ -1070,7 +1079,7 @@
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="avanzado"><span><strong>Avanzado</strong> — análisis, evaluación, casos complejos.</span></label>' +
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="mixto" checked><span><strong>Mixto</strong> (recomendado) — distribución equilibrada Bloom.</span></label>' +
               '</fieldset>' +
-              '<p class="akd-rules">Reglas aplicadas: cada pregunta tendrá <strong>exactamente 4 opciones</strong> (A, B, C, D) con una sola correcta. Las que no cumplan se descartan automáticamente.</p>' +
+              '<p class="akd-rules">Reglas aplicadas: cada pregunta tendrá el número exacto de opciones que indiques arriba, con una sola correcta. Las que no cumplan se descartan automáticamente.</p>' +
             '</div>' +
             '<div class="aiken-dialog-foot">' +
               '<button type="button" class="btn secondary" id="akd-cancel">Cancelar</button>' +
@@ -1094,9 +1103,16 @@
             nEl.style.borderColor = '#dc2626';
             return;
           }
+          const noptsEl = overlay.querySelector('#akd-nopts');
+          const n_options = parseInt(noptsEl.value, 10);
+          if (isNaN(n_options) || n_options < 2 || n_options > 6) {
+            noptsEl.focus();
+            noptsEl.style.borderColor = '#dc2626';
+            return;
+          }
           const cxEl = overlay.querySelector('input[name="akd-cx"]:checked');
           const complexity = cxEl ? cxEl.value : 'mixto';
-          close({n, complexity});
+          close({n, complexity, n_options});
         };
         // Foco inicial en el input numérico
         setTimeout(() => overlay.querySelector('#akd-n').focus(), 50);

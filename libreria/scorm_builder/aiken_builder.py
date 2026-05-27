@@ -180,6 +180,7 @@ def build_extended_aiken(
     output_dir: Path,
     n_questions_per_topic: int = 30,
     complexity: str = "mixto",
+    n_options: int = 4,
 ) -> List[Path]:
     """Genera un .txt Aiken por tema con N preguntas adicionales generadas por IA.
 
@@ -193,6 +194,8 @@ def build_extended_aiken(
         complexity: "basico" | "intermedio" | "avanzado" | "mixto" — ajusta
             la distribución de tipos de pregunta según Bloom. Pasado a
             generate_extended_aiken.
+        n_options: nº de opciones (respuestas) por pregunta. Default 4.
+            v0.8.3 — configurable a petición del cliente.
 
     Returns:
         lista de ficheros generados (uno por tema si la IA respondió)
@@ -214,6 +217,7 @@ def build_extended_aiken(
             topic,
             n_questions=n_questions_per_topic,
             complexity=complexity,
+            n_options=n_options,
         )
         if not questions:
             continue

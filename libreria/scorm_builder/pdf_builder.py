@@ -668,6 +668,22 @@ def _make_styles(theme: Theme):
     }
 
 
+def _clean_course_title(title: str) -> str:
+    """v0.8.3: quita el sufijo '(N unidades)' del título del curso para que
+    los PDFs/SCORMs sirvan tanto si se sube el curso entero como en tandas.
+
+    Ejemplos:
+        'Ejecución, Control y Evaluación (6 unidades)' → 'Ejecución, Control y Evaluación'
+        'Curso de Calidad (3 Unidades)'                → 'Curso de Calidad'
+        'Mi Curso'                                      → 'Mi Curso'  (sin cambios)
+    """
+    if not title:
+        return title
+    import re as _re
+    return _re.sub(r"\s*\(\s*\d+\s+unidades?\s*\)\s*$", "", title,
+                   flags=_re.IGNORECASE).strip()
+
+
 def _make_header_footer(course_title: str, topic_title: str, theme: Theme):
     primary_deep = HexColor(theme.primary_deep)
     accent = HexColor(theme.accent)
@@ -675,13 +691,15 @@ def _make_header_footer(course_title: str, topic_title: str, theme: Theme):
 
     # Truncado inteligente: si ambos textos son largos, recortar para que quepan
     # sin solaparse. Cada uno tiene como máximo la mitad menos un pequeño gap.
+    # v0.8.3: terminamos en punto "." en lugar de elipsis "…" a petición del
+    # cliente (más limpio en PDFs formativos).
     def _shorten(s: str, max_chars: int) -> str:
         s = (s or "").strip()
         if len(s) <= max_chars:
             return s
-        return s[: max_chars - 1].rstrip() + "…"
+        return s[: max_chars - 1].rstrip().rstrip(",;:.") + "."
 
-    course_short = _shorten(course_title, 45)
+    course_short = _shorten(_clean_course_title(course_title), 45)
     topic_short = _shorten(topic_title, 45)
 
     def draw(canvas, doc):
@@ -729,7 +747,9 @@ def build_pdf(
 
     # Portada
     story.append(Spacer(1, 4 * cm))
-    story.append(Paragraph(_strip_html_for_pdf(course.metadata.title), styles["h1"]))
+    # v0.8.3: limpiar "(N unidades)" del título antes de mostrarlo.
+    _clean_title = _clean_course_title(course.metadata.title)
+    story.append(Paragraph(_strip_html_for_pdf(_clean_title), styles["h1"]))
     story.append(Spacer(1, 0.5 * cm))
     story.append(Paragraph(
         f"<b>Tema {topic.number}:</b> {_strip_html_for_pdf(topic.title)}",
@@ -808,7 +828,7 @@ def build_pdf(
         str(output_path), pagesize=A4,
         leftMargin=2 * cm, rightMargin=2 * cm,
         topMargin=2.3 * cm, bottomMargin=2 * cm,
-        title=f"{course.metadata.title} · Tema {topic.number}",
+        title=f"{_clean_title} · Tema {topic.number}",
         author=course.metadata.author or "Curso e-learning",
     )
     doc.build(story, onFirstPage=hf, onLaterPages=hf)
