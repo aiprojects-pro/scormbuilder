@@ -1033,20 +1033,22 @@
       bindAct('aiken-ext', async (btn) => {
           const config = await openAikenConfigDialog();
           if (!config) return;   // cancelado
-          const {n, complexity, n_options} = config;
+          const {n, complexity, n_options, format} = config;
+          const fmtLabel = format === 'gift' ? 'GIFT (con feedback)' : 'Aiken';
           if (!confirm('Esto pedirá a la IA ' + n + ' preguntas por tema (' + n_options +
-                       ' opciones por pregunta), nivel "' + complexity +
+                       ' opciones por pregunta), formato ' + fmtLabel + ', nivel "' + complexity +
                        '". Puede tardar varios minutos. ¿Continuar?')) return;
           collectChanges();
           const data = await callAI(btn, '/api/curso/' + TOKEN + '/ai-aiken-extendido',
-                                     {n: n, complexity: complexity, n_options: n_options});
+                                     {n: n, complexity: complexity, n_options: n_options, format: format});
           if (!data) return;
           const list = (data.files || []).map(f => '• ' + f).join('\n');
-          alert('✓ Banco Aiken extendido generado (' + n + ' preg/tema × ' + n_options +
+          const outDir = format === 'gift' ? 'gift_extendido/' : 'aiken_extendido/';
+          alert('✓ Banco ' + fmtLabel + ' generado (' + n + ' preg/tema × ' + n_options +
                 ' opciones, nivel ' + complexity + '):\n\n' + list +
-                '\n\nLos archivos están en la carpeta del curso (aiken_extendido/). ' +
+                '\n\nLos archivos están en la carpeta del curso (' + outDir + '). ' +
                 'Cuando guardes el curso se incluirán en el ZIP descargable.');
-          setStatus('✓ ' + (data.files || []).length + ' bancos Aiken (' + complexity + ', ' + n +
+          setStatus('✓ ' + (data.files || []).length + ' bancos ' + fmtLabel + ' (' + complexity + ', ' + n +
                     ' preg × ' + n_options + ' opciones) generados.');
         });
 
@@ -1078,6 +1080,11 @@
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="intermedio"><span><strong>Intermedio</strong> — aplicación a casos sencillos.</span></label>' +
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="avanzado"><span><strong>Avanzado</strong> — análisis, evaluación, casos complejos.</span></label>' +
                 '<label class="akd-radio"><input type="radio" name="akd-cx" value="mixto" checked><span><strong>Mixto</strong> (recomendado) — distribución equilibrada Bloom.</span></label>' +
+              '</fieldset>' +
+              '<fieldset class="akd-field">' +
+                '<legend class="akd-label">Formato de exportación</legend>' +
+                '<label class="akd-radio"><input type="radio" name="akd-fmt" value="aiken" checked><span><strong>Aiken</strong> (compatible Moodle, sin retroalimentación) — el más simple, importable en Moodle, pero NO incluye feedback al alumno.</span></label>' +
+                '<label class="akd-radio"><input type="radio" name="akd-fmt" value="gift"><span><strong>GIFT</strong> (compatible Moodle, CON retroalimentación) — incluye feedback por respuesta y explicación global. Recomendado si quieres comentar al alumno por qué falló.</span></label>' +
               '</fieldset>' +
               '<p class="akd-rules">Reglas aplicadas: cada pregunta tendrá el número exacto de opciones que indiques arriba, con una sola correcta. Las que no cumplan se descartan automáticamente.</p>' +
             '</div>' +
@@ -1112,7 +1119,10 @@
           }
           const cxEl = overlay.querySelector('input[name="akd-cx"]:checked');
           const complexity = cxEl ? cxEl.value : 'mixto';
-          close({n, complexity, n_options});
+          // v0.8.4: formato Aiken (sin feedback) o GIFT (con feedback)
+          const fmtEl = overlay.querySelector('input[name="akd-fmt"]:checked');
+          const format = fmtEl ? fmtEl.value : 'aiken';
+          close({n, complexity, n_options, format});
         };
         // Foco inicial en el input numérico
         setTimeout(() => overlay.querySelector('#akd-n').focus(), 50);

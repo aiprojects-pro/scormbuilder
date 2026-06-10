@@ -53,14 +53,14 @@ AIKEN_MIN_QUESTIONS_PER_TOPIC = 10
 def _aiken_block(topic: Topic, course_title: str, course_mastery: int) -> str:
     """Genera el bloque Aiken de un tema en formato ESTRICTO Moodle.
 
-    REGLAS APLICADAS (v0.7.2):
+    REGLAS APLICADAS:
       - Solo preguntas con EXACTAMENTE 4 opciones. Las que tengan otra
         cantidad (V/F con 2, huecos con 1, etc.) se filtran silenciosamente.
-        Aiken-Moodle no las acepta de forma fiable y el usuario las quiere
-        homogéneas.
       - Cabecero `// ===...` eliminado (Moodle nuevo rechaza líneas-comentario
         antes de la primera pregunta).
-      - Explicación va como `COMMENT:` oficial Aiken+Moodle (no `// Expl…`).
+      - v0.8.4: ELIMINADO `COMMENT:` con la explicación. Aiken estándar NO
+        soporta retroalimentación: Moodle rechaza ficheros con COMMENT:.
+        Si quieres feedback, usa formato GIFT (`build_gift_file`).
     """
     lines = []
     for q in topic.quiz:
@@ -76,11 +76,121 @@ def _aiken_block(topic: Topic, course_title: str, course_mastery: int) -> str:
         for idx, opt in enumerate(opts):
             lines.append(f"{_option_letter(idx)}. {_aiken_safe_line(opt)}")
         lines.append(f"ANSWER: {_option_letter(ci)}")
-        if q.explanation:
-            lines.append(f"COMMENT: {_aiken_safe_line(q.explanation)}")
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ============================================================
+# FORMATO GIFT (alternativa a Aiken CON retroalimentación)
+# ============================================================
+# GIFT es el formato nativo de Moodle para banco de preguntas con feedback.
+# Estructura:
+#     ::Título opcional:: Enunciado de la pregunta {
+#     =Respuesta correcta #Feedback al acertar
+#     ~Respuesta incorrecta 1 #Feedback al fallar 1
+#     ~Respuesta incorrecta 2 #Feedback al fallar 2
+#     ~Respuesta incorrecta 3 #Feedback al fallar 3
+#     ####Feedback global de la pregunta (explicación general)
+#     }
+#
+# Lo que el formato Aiken no soporta lo gestiona GIFT de forma nativa.
+
+_GIFT_ESCAPE_CHARS = {"~": r"\~", "=": r"\=", "#": r"\#", "{": r"\{",
+                      "}": r"\}", ":": r"\:"}
+
+def _gift_safe(text: str) -> str:
+    """Escapa los caracteres especiales de GIFT. Mantiene saltos de línea
+    como `\\n` literales tal y como Moodle GIFT espera dentro de respuestas
+    multilínea."""
+    if not text:
+        return ""
+    s = " ".join(str(text).split())  # colapsar whitespace
+    for ch, esc in _GIFT_ESCAPE_CHARS.items():
+        s = s.replace(ch, esc)
+    return s
+
+
+def _gift_block(topic: Topic, course_title: str) -> str:
+    """Genera el bloque GIFT de un tema. v0.8.4.
+
+    A diferencia de Aiken:
+      - Sí lleva retroalimentación (feedback) por respuesta + global.
+      - Acepta cualquier número de opciones (no solo 4).
+      - Se importa en Moodle desde Banco de preguntas → Importar → GIFT.
+    """
+    lines = []
+    for q_idx, q in enumerate(topic.quiz):
+        if not q.options or len(q.options) < 2:
+            continue
+        opts = list(q.options)
+        ci = q.correct_index
+        if not (0 <= ci < len(opts)):
+            ci = 0
+        # Título opcional: T{topic.number}-Q{idx+1}
+        title = f"T{topic.number:02d}-Q{q_idx+1}"
+        lines.append(f"::{_gift_safe(title)}:: {_gift_safe(q.text)} {{")
+        for idx, opt in enumerate(opts):
+            prefix = "=" if idx == ci else "~"
+            opt_safe = _gift_safe(opt)
+            if idx == ci:
+                # Feedback positivo para la correcta
+                lines.append(f"\t{prefix}{opt_safe} #Correcto")
+            else:
+                lines.append(f"\t{prefix}{opt_safe} #Incorrecto")
+        # Retroalimentación global (la explicación de la pregunta)
+        if q.explanation:
+            lines.append(f"\t####{_gift_safe(q.explanation)}")
+        lines.append("}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_gift_file(
+    course: CourseStructure,
+    output_path: Path,
+    one_per_topic: bool = True,
+) -> List[Path]:
+    """Genera ficheros GIFT (.txt) a partir del curso, CON retroalimentación.
+
+    GIFT es el formato preferido de Moodle cuando necesitas feedback por
+    pregunta (Aiken no lo soporta). Se importa en Moodle desde:
+        Banco de preguntas → Importar → Formato: GIFT
+
+    Args y returns idénticos a `build_aiken_file`.
+    """
+    output_path = Path(output_path)
+    generated = []
+
+    if one_per_topic:
+        output_path.mkdir(parents=True, exist_ok=True)
+        for topic in course.topics:
+            if not topic.quiz:
+                continue
+            n_valid = sum(1 for q in topic.quiz
+                          if q.text and q.options and len(q.options) >= 2
+                          and 0 <= q.correct_index < len(q.options))
+            if n_valid < 5:  # umbral más bajo que Aiken porque GIFT acepta más
+                continue
+            content = _gift_block(topic, course.metadata.title)
+            fname = output_path / f"gift_T{topic.number:02d}.txt"
+            fname.write_text(content, encoding="utf-8")
+            generated.append(fname)
+    else:
+        if output_path.suffix == "":
+            output_path = output_path / "gift_completo.txt"
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        contents = []
+        for topic in course.topics:
+            if not topic.quiz:
+                continue
+            contents.append(_gift_block(topic, course.metadata.title))
+        if contents:
+            output_path.write_text("\n\n".join(contents), encoding="utf-8")
+            generated.append(output_path)
+
+    return generated
 
 
 def _count_aiken_valid_questions(topic: Topic) -> int:
@@ -238,11 +348,74 @@ def build_extended_aiken(
             for idx, opt in enumerate(opts):
                 lines.append(f"{_option_letter(idx)}. {_aiken_safe_line(opt)}")
             lines.append(f"ANSWER: {_option_letter(ci)}")
-            if q.get("explanation"):
-                lines.append(f"COMMENT: {_aiken_safe_line(q['explanation'])}")
+            # v0.8.4: SIN `COMMENT:` (Aiken estándar Moodle no lo acepta).
+            # La explicación se guarda en GIFT (formato alternativo con feedback).
             lines.append("")
 
         fname = output_dir / f"aiken_T{topic.number:02d}_extendido.txt"
+        fname.write_text("\n".join(lines), encoding="utf-8")
+        generated.append(fname)
+
+    return generated
+
+
+def build_extended_gift(
+    course: CourseStructure,
+    output_dir: Path,
+    n_questions_per_topic: int = 30,
+    complexity: str = "mixto",
+    n_options: int = 4,
+) -> List[Path]:
+    """v0.8.4: variante GIFT del banco extendido. Mismo IA, formato distinto.
+
+    GIFT (Moodle native) sí soporta retroalimentación → cuando el formador
+    quiere feedback al alumno usa este, no Aiken.
+    """
+    from scorm_builder.ai_assist import is_available, generate_extended_aiken
+
+    if not is_available():
+        return []
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated: List[Path] = []
+
+    for topic in course.topics:
+        questions = generate_extended_aiken(
+            topic,
+            n_questions=n_questions_per_topic,
+            complexity=complexity,
+            n_options=n_options,
+        )
+        if not questions:
+            continue
+
+        lines = []
+        for q_idx, q in enumerate(questions):
+            opts = list(q.get("options", []))
+            if not opts or len(opts) < 2:
+                continue
+            ci = q.get("correct_index", 0)
+            try:
+                ci = int(ci)
+            except (TypeError, ValueError):
+                ci = 0
+            if not (0 <= ci < len(opts)):
+                ci = 0
+            text = q.get("text", "")
+            title = f"T{topic.number:02d}-Q{q_idx+1}"
+            lines.append(f"::{_gift_safe(title)}:: {_gift_safe(text)} {{")
+            for idx, opt in enumerate(opts):
+                prefix = "=" if idx == ci else "~"
+                opt_safe = _gift_safe(opt)
+                fb = "Correcto" if idx == ci else "Incorrecto"
+                lines.append(f"\t{prefix}{opt_safe} #{fb}")
+            if q.get("explanation"):
+                lines.append(f"\t####{_gift_safe(q['explanation'])}")
+            lines.append("}")
+            lines.append("")
+
+        fname = output_dir / f"gift_T{topic.number:02d}_extendido.txt"
         fname.write_text("\n".join(lines), encoding="utf-8")
         generated.append(fname)
 

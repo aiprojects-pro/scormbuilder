@@ -570,7 +570,7 @@ def render_page(title, body, user=None, active=""):
 <body>
 <header class="topbar">
   <div class="inner">
-    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.8.3</span></h1>
+    <h1><a href="/">SCORM Builder</a> <span class="badge">v0.8.4</span></h1>
     <nav>
       {nav_links}
       {user_chip}
@@ -2042,15 +2042,17 @@ def moodle_upload(token):
 # desde Moodle: Curso → Banco de preguntas → Importar → Aiken.
 
 def _collect_aiken_files(token: str, user: dict) -> List[dict]:
-    """Lista los .txt de bancos Aiken disponibles para subir a Moodle.
+    """Lista los .txt de bancos Aiken Y GIFT disponibles para subir a Moodle.
 
-    Busca en las mismas ubicaciones que `api_descargar_aiken`:
-      - job_dir/aiken_extendido/*.txt
-      - job_dir/aiken/*.txt
-      - job_dir/salida/aiken/*.txt
-      - job_dir/salida/aiken_extendido/*.txt
-      - job_dir/salida/curso/aiken*/*.txt
-      - job_dir/salida/unidad_NN_*/aiken*/*.txt
+    v0.8.4: amplía la lista para incluir también carpetas `gift_*` (Moodle
+    importa ambos formatos del mismo modo; el formador elige el formato
+    correcto en el desplegable de Moodle al importar).
+
+    Busca en:
+      - job_dir/{aiken,aiken_extendido,gift,gift_extendido}/*.txt
+      - job_dir/salida/{...}
+      - job_dir/salida/curso/{...}
+      - job_dir/salida/unidad_NN_*/{...}
     """
     row, _, _ = _load_course_for_user(token, user)
     if not row:
@@ -2058,19 +2060,14 @@ def _collect_aiken_files(token: str, user: dict) -> List[dict]:
     job_dir = Path(row["zip_path"]).parent
     output_dir = job_dir / "salida"
     out = []
-    candidates = [
-        job_dir / "aiken_extendido",
-        job_dir / "aiken",
-    ]
+    # v0.8.4: incluir también gift_* además de aiken_*
+    folder_names = ["aiken", "aiken_extendido", "gift", "gift_extendido"]
+    candidates = [job_dir / name for name in folder_names]
     if output_dir.exists():
-        candidates += [
-            output_dir / "aiken",
-            output_dir / "aiken_extendido",
-            output_dir / "curso" / "aiken",
-            output_dir / "curso" / "aiken_extendido",
-        ]
+        candidates += [output_dir / name for name in folder_names]
+        candidates += [output_dir / "curso" / name for name in folder_names]
         for unit_dir in sorted(output_dir.glob("unidad_*")):
-            candidates += [unit_dir / "aiken", unit_dir / "aiken_extendido"]
+            candidates += [unit_dir / name for name in folder_names]
     seen_names = set()
     for d in candidates:
         if not d.exists():
@@ -2079,11 +2076,15 @@ def _collect_aiken_files(token: str, user: dict) -> List[dict]:
             if f.name in seen_names:
                 continue
             seen_names.add(f.name)
+            # Etiquetar formato según el directorio padre, para que el caller
+            # (UI Moodle) pueda mostrar al usuario qué formato es cada uno.
+            fmt = "gift" if "gift" in d.name.lower() else "aiken"
             out.append({
                 "name": f.stem,
                 "filename": f.name,
                 "path": str(f),
                 "size": f.stat().st_size,
+                "format": fmt,
             })
     return out
 
@@ -4991,26 +4992,43 @@ def course_ai_aiken_extendido(token):
         data = json.load(f)
 
     from scorm_builder.api import course_from_dict
-    from scorm_builder.aiken_builder import build_extended_aiken
+    from scorm_builder.aiken_builder import build_extended_aiken, build_extended_gift
 
     course = course_from_dict(data)
     course_dir = Path(row["zip_path"]).parent
-    aiken_dir = course_dir / "aiken_extendido"
-    files = build_extended_aiken(
-        course, aiken_dir,
-        n_questions_per_topic=n,
-        complexity=complexity,
-        n_options=n_options,
-    )
+
+    # v0.8.4: el cliente puede pedir formato Aiken (sin feedback) o GIFT (con
+    # feedback). Por defecto Aiken para retro-compatibilidad.
+    out_format = str(payload.get("format", "aiken")).lower().strip()
+    if out_format not in ("aiken", "gift"):
+        out_format = "aiken"
+
+    if out_format == "gift":
+        out_dir = course_dir / "gift_extendido"
+        files = build_extended_gift(
+            course, out_dir,
+            n_questions_per_topic=n,
+            complexity=complexity,
+            n_options=n_options,
+        )
+    else:
+        out_dir = course_dir / "aiken_extendido"
+        files = build_extended_aiken(
+            course, out_dir,
+            n_questions_per_topic=n,
+            complexity=complexity,
+            n_options=n_options,
+        )
+
     if not files:
-        # v0.7.1: diagnóstico más informativo. Las causas habituales son:
+        # Diagnóstico más informativo. Las causas habituales son:
         #   - ANTHROPIC_API_KEY caducada / sin saldo
         #   - El docx tiene muy poco contenido didáctico (filtrado por
         #     exclude_paratext) → contenido vacío → IA devuelve []
         #   - Modelo bloqueado / red sin salida HTTPS al endpoint
         return jsonify({
             "error": (
-                "No se generó ningún banco Aiken. Causas habituales:\n"
+                f"No se generó ningún banco {out_format.upper()}. Causas habituales:\n"
                 "  • La API key de Anthropic no es válida o no tiene saldo.\n"
                 "  • El contenido del curso es demasiado corto (¿todos los "
                 "subapartados son objetivos o bibliografía?).\n"
@@ -5019,7 +5037,8 @@ def course_ai_aiken_extendido(token):
                 "para ver el error concreto."
             ),
         }), 502
-    return jsonify({"ok": True, "files": [f.name for f in files]})
+    return jsonify({"ok": True, "format": out_format,
+                    "files": [f.name for f in files]})
 
 
 # ============================================================
@@ -6463,6 +6482,29 @@ def api_generar():
     course_titles: list[str] = []
     editable_course_data: Optional[dict] = None
 
+    # v0.8.4 BUG FIX: en modo batch, ORDENAR los docx por su número de Tema
+    # extraído del nombre del fichero ANTES de procesarlos, para que el orden
+    # de procesamiento NO dependa del orden de selección en el navegador.
+    # Antes, si el usuario subía 8 archivos en orden T6, T1, T2... el primero
+    # conservaba su número (T6) pero los siguientes se renumeraban secuencial
+    # a 2, 3, ... colisionando con los números preservados → temas duplicados
+    # y títulos que no coincidían con su número.
+    def _extract_tema_num(fileobj):
+        if not fileobj or not fileobj.filename:
+            return (9999, "")
+        stem = Path(secure_filename(fileobj.filename) or "").stem.replace("_", " ")
+        m = re.match(
+            r"^\s*(?:tema|m[oó]dulo|unidad|cap[ií]tulo|lecci[oó]n)\s+(\d+)",
+            stem, flags=re.IGNORECASE,
+        )
+        if m:
+            return (int(m.group(1)), stem)
+        # Sin número → al final (orden estable por nombre)
+        return (9999, stem)
+
+    if upload_mode == "batch":
+        docx_files = sorted(docx_files, key=_extract_tema_num)
+
     for idx, docx_file in enumerate(docx_files):
         # Guardar el .docx subido
         safe_name = secure_filename(docx_file.filename) or f"curso_{idx+1}.docx"
@@ -6547,10 +6589,31 @@ def api_generar():
         if editable_course_data is None:
             editable_course_data = json.loads(json.dumps(course_dict))
         elif upload_mode == "batch":
+            # v0.8.4 BUG FIX: NO renumerar secuencialmente — PRESERVAR el
+            # topic.number que ya viene poblado por build_complete_course
+            # (que lo tomó de topic_number_override = número del fichero).
+            # Antes hacíamos `topic_copy["number"] = len+1` lo que sobrescribía
+            # con un índice secuencial, causando que el "Tema 6.docx" se
+            # transformase en topic.number=2 si era el segundo docx subido,
+            # rompiendo la correspondencia entre nombre del fichero y dropdown
+            # del editor → títulos y números desordenados.
+            existing_numbers = {
+                t.get("number") for t in editable_course_data.get("topics", [])
+            }
+            next_fallback = max(existing_numbers, default=0) + 1
             for topic in course_dict.get("topics", []):
                 topic_copy = json.loads(json.dumps(topic))
-                topic_copy["number"] = len(editable_course_data.get("topics", [])) + 1
+                # Si el topic ya tiene un número y NO colisiona, lo mantenemos.
+                # Si colisiona o falta, asignamos el siguiente libre.
+                orig_num = topic_copy.get("number")
+                if not orig_num or orig_num in existing_numbers:
+                    topic_copy["number"] = next_fallback
+                    next_fallback += 1
+                existing_numbers.add(topic_copy["number"])
                 editable_course_data.setdefault("topics", []).append(topic_copy)
+            # Tras añadir todo, ordenar topics por number para que el dropdown
+            # del editor los muestre siempre en orden 1,2,3,...
+            editable_course_data["topics"].sort(key=lambda t: t.get("number", 9999))
 
         # ----- SCORM 2004 (si se pide) -----
         if scorm_version in ("2004", "both"):
@@ -6826,37 +6889,38 @@ def api_descargar_aiken(token):
     # NO en salida/aiken_extendido. Esto era el bug que reportó Rosario:
     # los archivos se generaban pero el endpoint no los encontraba.
     aiken_files = []
-    # 1) Carpetas a nivel de job_dir (donde guarda ai-aiken-extendido)
-    for search_dir in [
-        job_dir / "aiken_extendido",
-        job_dir / "aiken",
-    ]:
+    # v0.8.4: incluir también ficheros GIFT (mismo .txt, distinto contenido).
+    # Las carpetas Aiken y GIFT comparten esquema.
+    folder_names = ["aiken", "aiken_extendido", "gift", "gift_extendido"]
+
+    # 1) Carpetas a nivel de job_dir (donde guarda ai-aiken-extendido y ai-gift)
+    for name in folder_names:
+        search_dir = job_dir / name
         if search_dir.exists():
             for f in search_dir.glob("*.txt"):
                 aiken_files.append((f, f"{search_dir.name}/{f.name}"))
     # 2) Carpetas dentro de output_dir (donde guarda la generación inicial)
     if output_dir.exists():
-        for search_dir in [
-            output_dir / "aiken",
-            output_dir / "aiken_extendido",
-            output_dir / "curso" / "aiken",
-            output_dir / "curso" / "aiken_extendido",
-        ]:
-            if search_dir.exists():
-                for f in search_dir.glob("*.txt"):
-                    aiken_files.append((f, f"{search_dir.name}/{f.name}"))
+        for name in folder_names:
+            for parent in [output_dir, output_dir / "curso"]:
+                search_dir = parent / name
+                if search_dir.exists():
+                    for f in search_dir.glob("*.txt"):
+                        aiken_files.append((f, f"{search_dir.name}/{f.name}"))
         # 3) En modo batch, recorrer cada unidad
         for unit_dir in sorted(output_dir.glob("unidad_*")):
             unit_name = unit_dir.name
-            for search_dir in [unit_dir / "aiken", unit_dir / "aiken_extendido"]:
+            for name in folder_names:
+                search_dir = unit_dir / name
                 if search_dir.exists():
                     for f in search_dir.glob("*.txt"):
                         aiken_files.append((f, f"{unit_name}/{search_dir.name}/{f.name}"))
 
     if not aiken_files:
         return jsonify({
-            "error": "No hay bancos Aiken en este curso. Genera primero el banco "
-                     "desde el editor (botón 📚 Banco Aiken IA) o regenera el curso "
+            "error": "No hay bancos Aiken/GIFT en este curso. Genera primero "
+                     "el banco desde el editor (botón 📚 Banco Aiken IA, elige "
+                     "formato Aiken o GIFT en el modal) o regenera el curso "
                      "con la opción 'banco Aiken' marcada."
         }), 404
 
@@ -6890,7 +6954,7 @@ def open_browser():
 def main():
     print()
     print("=" * 60)
-    print("  SCORM Builder · App web v0.5.1")
+    print("  SCORM Builder · App web v0.8.4")
     print("=" * 60)
     print()
     print(f"  Carpeta de trabajo: {APP_DIR}")
