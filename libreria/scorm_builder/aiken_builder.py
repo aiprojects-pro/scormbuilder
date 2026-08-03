@@ -15,7 +15,7 @@ como comentarios "//" antes del bloque para que el formador las vea.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from scorm_builder.parser import CourseStructure, Topic
 
@@ -291,6 +291,7 @@ def build_extended_aiken(
     n_questions_per_topic: int = 30,
     complexity: str = "mixto",
     n_options: int = 4,
+    use_batch: Optional[bool] = None,
 ) -> List[Path]:
     """Genera un .txt Aiken por tema con N preguntas adicionales generadas por IA.
 
@@ -306,11 +307,17 @@ def build_extended_aiken(
             generate_extended_aiken.
         n_options: nº de opciones (respuestas) por pregunta. Default 4.
             v0.8.3 — configurable a petición del cliente.
+        use_batch: v0.8.6 — usar Batch API (50% descuento). Si None, se
+            decide automáticamente: batch si ≥3 temas (donde el ahorro
+            compensa la mayor latencia), síncrono si <3 temas (usuario
+            probablemente iterando y quiere feedback rápido).
 
     Returns:
         lista de ficheros generados (uno por tema si la IA respondió)
     """
-    from scorm_builder.ai_assist import is_available, generate_extended_aiken
+    from scorm_builder.ai_assist import (
+        is_available, generate_extended_aiken, generate_extended_aiken_batch,
+    )
 
     if not is_available():
         return []
@@ -319,19 +326,11 @@ def build_extended_aiken(
     output_dir.mkdir(parents=True, exist_ok=True)
     generated: List[Path] = []
 
-    # v0.7.1: formato Aiken estricto (sin cabecero `// ===`). El archivo
-    # generado se importa directamente en Moodle desde Banco de preguntas →
-    # Importar → Formato Aiken.
-    for topic in course.topics:
-        questions = generate_extended_aiken(
-            topic,
-            n_questions=n_questions_per_topic,
-            complexity=complexity,
-            n_options=n_options,
-        )
-        if not questions:
-            continue
+    # v0.8.6: decidir batch vs síncrono
+    if use_batch is None:
+        use_batch = len(course.topics) >= 3
 
+    def _questions_to_lines(questions):
         lines = []
         for q in questions:
             opts = list(q.get("options", []))[:26]
@@ -349,12 +348,40 @@ def build_extended_aiken(
                 lines.append(f"{_option_letter(idx)}. {_aiken_safe_line(opt)}")
             lines.append(f"ANSWER: {_option_letter(ci)}")
             # v0.8.4: SIN `COMMENT:` (Aiken estándar Moodle no lo acepta).
-            # La explicación se guarda en GIFT (formato alternativo con feedback).
             lines.append("")
+        return lines
 
-        fname = output_dir / f"aiken_T{topic.number:02d}_extendido.txt"
-        fname.write_text("\n".join(lines), encoding="utf-8")
-        generated.append(fname)
+    if use_batch:
+        # v0.8.6: Batch API — 50% descuento. Latencia: minutos.
+        batch_results = generate_extended_aiken_batch(
+            list(course.topics),
+            n_questions=n_questions_per_topic,
+            complexity=complexity,
+            n_options=n_options,
+        )
+        for topic in course.topics:
+            questions = batch_results.get(topic.number)
+            if not questions:
+                continue
+            lines = _questions_to_lines(questions)
+            fname = output_dir / f"aiken_T{topic.number:02d}_extendido.txt"
+            fname.write_text("\n".join(lines), encoding="utf-8")
+            generated.append(fname)
+    else:
+        # Modo síncrono (para 1-2 temas o si el batch falla).
+        for topic in course.topics:
+            questions = generate_extended_aiken(
+                topic,
+                n_questions=n_questions_per_topic,
+                complexity=complexity,
+                n_options=n_options,
+            )
+            if not questions:
+                continue
+            lines = _questions_to_lines(questions)
+            fname = output_dir / f"aiken_T{topic.number:02d}_extendido.txt"
+            fname.write_text("\n".join(lines), encoding="utf-8")
+            generated.append(fname)
 
     return generated
 

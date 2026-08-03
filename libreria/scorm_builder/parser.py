@@ -258,6 +258,13 @@ HEADING1_PATTERNS = [
 ]
 
 HEADING2_PATTERN = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+\S")
+# v0.8.5: patrón simple "N. Título" (un solo nivel de numeración) para docx
+# escritos a mano donde el autor NO usa estilos Heading (todos los párrafos
+# quedan como "Normal") y numera los subapartados manualmente como
+# "1. Introducción", "2. Definición", "3. Clasificación", etc. Sin este
+# patrón, los subapartados quedaban invisibles y todo el tema aparecía como
+# un solo bloque plano.
+HEADING2_SIMPLE_PATTERN = re.compile(r"^\s*(\d+)\.\s+[A-ZÁÉÍÓÚÑ¿¡]")
 
 
 def _slugify(text: str) -> str:
@@ -332,10 +339,28 @@ def _looks_like_heading1(text: str) -> bool:
 
 
 def _looks_like_heading2(text: str) -> bool:
-    """Devuelve True si el texto encaja con un patrón típico de Heading 2 (N.M)."""
+    """Devuelve True si el texto encaja con un patrón típico de Heading 2.
+
+    Formatos aceptados:
+      - "N.M Título" o "N.M. Título" (por ejemplo "1.2 Definición")
+      - v0.8.5: "N. Título" (un solo nivel, común en docx con estilo Normal
+        en todos los párrafos y numeración manual). Se aplica una guarda de
+        longitud (≤ 150 caracteres) para no confundir párrafos enumerados
+        largos con subapartados.
+    """
     if not text or len(text) > 200:
         return False
-    return bool(HEADING2_PATTERN.match(text))
+    # 1) Patrón estricto N.M o N.M. → siempre acepta
+    if HEADING2_PATTERN.match(text):
+        return True
+    # 2) Patrón simple "N. Título" → solo si el párrafo es CORTO (heading real,
+    #    no un párrafo enumerado largo). Además evitamos "10. Cualquier cosa"
+    #    porque los tema con >9 subapartados son raros y ese patrón se solapa
+    #    a menudo con listas humanas ("10. Sanciones penales aplicables al...").
+    #    Si necesitas más de 9 subapartados, usa estilos Heading en el docx.
+    if len(text) <= 150 and HEADING2_SIMPLE_PATTERN.match(text):
+        return True
+    return False
 
 
 def _detect_metadata(paragraphs: List[Any], course: CourseStructure) -> int:
@@ -929,8 +954,14 @@ def parse_docx(
                 continue
             # Subapartado normal
             sub_number = f"{current_topic.number}.{len(current_topic.subsections) + 1}"
-            # Limpiar el número del título si lo lleva
+            # Limpiar el número del título si lo lleva.
+            # v0.8.5: acepta también el patrón simple "N. " (además de "N.M.").
+            # El orden importa: probar primero N.M para no romper docx con
+            # numeración completa; después el patrón simple.
             title_clean = re.sub(r"^\s*\d+\.\d+\.?\s*", "", text).strip()
+            if title_clean == text.strip():
+                # No matcheó N.M → probar patrón simple "N. "
+                title_clean = re.sub(r"^\s*\d+\.\s+", "", text).strip()
             # sub_id prefijado con el nº de tema para evitar colisiones entre
             # temas (inline_quiz se keyed por sub_id; antes "l1" del tema 1 y
             # "l1" del tema 2 se mezclaban).
