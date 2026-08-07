@@ -345,22 +345,54 @@ def _looks_like_heading2(text: str) -> bool:
       - "N.M Título" o "N.M. Título" (por ejemplo "1.2 Definición")
       - v0.8.5: "N. Título" (un solo nivel, común en docx con estilo Normal
         en todos los párrafos y numeración manual). Se aplica una guarda de
-        longitud (≤ 150 caracteres) para no confundir párrafos enumerados
+        longitud y de valor de N para no confundir párrafos enumerados
         largos con subapartados.
+      - v0.8.7 (bug #81 fix): añadidas heurísticas para no confundir list
+        items numerados (66., 67., ...) con headings. Ver detalles abajo.
     """
     if not text or len(text) > 200:
         return False
-    # 1) Patrón estricto N.M o N.M. → siempre acepta
+    # 1) Patrón estricto N.M o N.M. → siempre acepta.
     if HEADING2_PATTERN.match(text):
         return True
-    # 2) Patrón simple "N. Título" → solo si el párrafo es CORTO (heading real,
-    #    no un párrafo enumerado largo). Además evitamos "10. Cualquier cosa"
-    #    porque los tema con >9 subapartados son raros y ese patrón se solapa
-    #    a menudo con listas humanas ("10. Sanciones penales aplicables al...").
-    #    Si necesitas más de 9 subapartados, usa estilos Heading en el docx.
-    if len(text) <= 150 and HEADING2_SIMPLE_PATTERN.match(text):
-        return True
-    return False
+    # 2) Patrón simple "N. Título" → solo si TODAS estas condiciones se cumplen:
+    #    a) Empieza por un dígito seguido de punto y mayúscula.
+    #    b) Longitud ≤ 100 caracteres (los headings reales son cortos; los
+    #       list items enumerados suelen ser oraciones completas).
+    #    c) N ≤ 15 — los subapartados de un tema rara vez pasan de 15. En
+    #       cambio las listas numeradas de Word llegan a 60, 70... Además
+    #       está la salvaguarda de que si un curso legítimo necesita más
+    #       de 15 subapartados, debería usar estilos Heading en el docx.
+    #    d) NO termina con cita bibliográfica del tipo "(Autor, año)" o
+    #       "(Autor, año, p. NN)": indica final de una regla/oración de
+    #       un manual, no un título de sección.
+    #    e) NO contiene "»" (comilla de cierre latina): usada para cerrar
+    #       citas literales, típico en textos académicos que enumeran
+    #       reglas o principios.
+    m = HEADING2_SIMPLE_PATTERN.match(text)
+    if not m:
+        return False
+    if len(text) > 100:
+        return False
+    try:
+        n = int(m.group(1))
+    except (ValueError, IndexError):
+        return False
+    if n > 15:
+        return False
+    # Reject if text ends with a citation "(Autor, año)" or "(Autor, año, p. NN)"
+    if re.search(r"\([\w\s\-\.]+,\s*\d{4}(?:,\s*p\.?\s*\d+)?\)\.?\s*$", text):
+        return False
+    # Reject if contains closing quote » (typical of literal citations)
+    if "»" in text:
+        return False
+    # v0.8.7: rechazar también si hay cita "(Autor, año)" en cualquier parte —
+    # los headings de subapartado casi nunca llevan citas académicas en el
+    # título. Cuando aparece "6. Vieira (2005) define..." es una oración
+    # dentro de una lista/párrafo, no un heading.
+    if re.search(r"\b[A-ZÁÉÍÓÚ][\w\-]+\s+\(\d{4}\)", text):
+        return False
+    return True
 
 
 def _detect_metadata(paragraphs: List[Any], course: CourseStructure) -> int:
