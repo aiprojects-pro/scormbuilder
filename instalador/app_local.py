@@ -3910,10 +3910,19 @@ def course_snapshots_list(token):
         return jsonify({"snapshots": []})
     out = []
     for p in sorted(snap_dir.glob("*.json"), reverse=True):
+        # v0.8.8: exponer cuántos temas tiene cada snapshot. El editor lo
+        # necesita para acotar el `topic_index` al cambiar de versión: una
+        # snapshot antigua puede tener menos temas que la versión actual.
+        try:
+            with open(p, encoding="utf-8") as f:
+                num_topics = len(json.load(f).get("topics", []))
+        except Exception:
+            num_topics = None
         out.append({
             "id": p.stem,
             "filename": p.name,
             "size": p.stat().st_size,
+            "num_topics": num_topics,
         })
     return jsonify({"snapshots": out})
 
@@ -6578,6 +6587,34 @@ def api_generar():
             warnings.append(f"Error procesando '{safe_name}': {e}")
             continue
 
+        # v0.8.8: un DOCX en el que el parser no encuentra ningún Heading 1
+        # (ni el patrón de respaldo "Tema N" / "Módulo N" / "Unidad N"...)
+        # produce un curso con CERO temas. Antes seguíamos adelante y se
+        # persistía structure.json con "topics": [], de modo que el curso
+        # aparecía en la biblioteca como "0 tema(s)", el editor abría vacío
+        # y la vista previa contestaba "Tema fuera de rango" sin explicar
+        # nunca la causa real. Descartamos la unidad con un aviso claro.
+        if not r.course.topics:
+            warnings.append(
+                f"'{safe_name}' se ha descartado: no se ha detectado ningún tema. "
+                "Los títulos de tema deben llevar el estilo 'Título 1' / 'Heading 1', "
+                "o empezar por 'Tema N', 'Módulo N', 'Unidad N', 'Capítulo N' o "
+                "'Lección N' (por ejemplo: 'Tema 1. Introducción')."
+            )
+            shutil.rmtree(this_out, ignore_errors=True)
+            continue
+
+        # v0.8.8: propagar los avisos del parser. Hasta ahora se perdían:
+        # `warnings_json` solo recogía errores de la propia app, así que lo
+        # que detectaba la librería al leer el Word (temas sin subapartados,
+        # PDFs que no se pudieron generar, etc.) nunca llegaba al usuario.
+        # Omitimos los "[WCAG ...]": la pasada WCAG de más abajo ya reporta
+        # esas mismas incidencias con su propio formato.
+        for w in r.warnings:
+            if w.startswith("[WCAG "):
+                continue
+            warnings.append(f"[{safe_name}] {w}")
+
         total_topics += r.num_topics
         total_questions += r.num_questions
         total_pdfs += len(r.pdf_files)
@@ -6767,6 +6804,25 @@ def api_generar():
                 )
         except Exception:
             pass
+
+    # v0.8.8: si NINGÚN documento ha aportado temas, no creamos el curso.
+    # Antes se registraba igualmente en la biblioteca un curso vacío que solo
+    # fallaba más tarde, al previsualizar. Mismo criterio que ya aplicaba la
+    # vista previa previa a la subida (`/api/preview-docx`).
+    if total_topics == 0:
+        # job_dir lo hemos creado en esta misma petición y no llega a
+        # referenciarse desde la BD, así que lo limpiamos para no dejar
+        # basura en disco por cada intento fallido.
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return jsonify({
+            "error": (
+                "No se ha detectado ningún tema en el documento. Revisa que los "
+                "títulos de tema lleven el estilo 'Título 1' / 'Heading 1', o que "
+                "empiecen por 'Tema N', 'Módulo N', 'Unidad N', 'Capítulo N' o "
+                "'Lección N' (por ejemplo: 'Tema 1. Introducción')."
+            ),
+            "warnings": warnings[:30],
+        }), 400
 
     display_title = (
         titulo_curso if upload_mode == "single"

@@ -1614,8 +1614,16 @@
         const snapSel = overlay.querySelector('#ed-preview-snap');
 
         function rebuildIframe() {
-          const ti = topicSel ? parseInt(topicSel.value) : 0;
+          let ti = topicSel ? parseInt(topicSel.value) : 0;
           const snap = snapSel.value;
+          // v0.8.8: el selector de tema se construye con los temas de la
+          // versión ACTUAL, pero una snapshot antigua puede tener menos.
+          // Sin acotar, el endpoint responde "Tema fuera de rango".
+          if (snap) {
+            const opt = snapSel.selectedOptions[0];
+            const nt = opt ? parseInt(opt.dataset.topics) : NaN;
+            if (!isNaN(nt) && nt > 0 && ti >= nt) ti = nt - 1;
+          }
           let url = '/api/curso/' + TOKEN + '/preview-html';
           if (snap) url += '/' + encodeURIComponent(snap);
           url += '?topic_index=' + ti;
@@ -1634,6 +1642,9 @@
               const opt = document.createElement('option');
               opt.value = s.id;
               opt.textContent = '📸 ' + s.id;
+              if (s.num_topics !== null && s.num_topics !== undefined) {
+                opt.dataset.topics = s.num_topics;
+              }
               snapSel.appendChild(opt);
             });
           })
