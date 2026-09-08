@@ -165,6 +165,11 @@ def _strip_html_for_pdf(text: str) -> str:
 
     Atributos soportados por reportlab en <a>: href, name, color, fontname,
     fontsize, underline, etc. Eliminamos todo lo demás.
+
+    v0.8.8: los tags vacíos se normalizan a la forma autocerrada (`<br/>`).
+    El HTML inline que genera `inline.py` usa `<br>` al estilo HTML5, pero
+    paraparser es XML estricto: con `<br>` sin cerrar toma el resto del
+    párrafo como contenido del tag y falla con "No content allowed in br tag".
     """
     if not text:
         return ""
@@ -186,6 +191,9 @@ def _strip_html_for_pdf(text: str) -> str:
         "role", "title", "lang", "tabindex",
     }
 
+    # Tags sin contenido: reportlab los exige autocerrados.
+    _VOID_TAGS = {"br"}
+
     def _clean_tag(m):
         full = m.group(0)
         # Caer si es cierre </tag>
@@ -197,6 +205,11 @@ def _strip_html_for_pdf(text: str) -> str:
             return full
         tag_name = tag_match.group(1)
         attrs_str = tag_match.group(2)
+        # <br>, <br />, <br clear="all"> → <br/>. Sus atributos no aportan
+        # nada en PDF y paraparser rechaza tanto el tag abierto como
+        # atributos que no conozca.
+        if tag_name.lower() in _VOID_TAGS:
+            return f"<{tag_name.lower()}/>"
         # Conservar solo atributos válidos
         # Match: name="value" o name='value' o name=value (sin comillas)
         attr_pattern = re.compile(
